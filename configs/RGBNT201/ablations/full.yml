@@ -1,0 +1,5 @@
+# Ablation row M4 — Full (HS+FACSS + AGF + HSL). Same as the main result.
+# Apply on top of configs/RGBNT201/EDITOR.yml.
+MODEL:
+  AGF: 1
+  HSL: 1

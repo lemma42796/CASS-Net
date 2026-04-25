@@ -1,0 +1,26 @@
+# Runtime dependencies for HTL-ReID.
+# Versions are floored at the oldest known-working release; any newer
+# compatible release should also work.
+#
+# pytorch_wavelets is vendored under ./pytorch_wavelets — do NOT pip install it.
+
+# Core
+torch>=1.10            # torch.linalg.cholesky, torch.diag_embed, torch.quantile
+torchvision>=0.11      # data transforms
+numpy>=1.20
+Pillow>=8.0            # data loading + attention-map viz
+PyYAML>=5.4            # yacs reads cfg yml
+yacs>=0.1.8            # config
+
+# Wavelet transform (pytorch_wavelets/ uses pywt under the hood)
+PyWavelets>=1.1
+
+# Logging / training
+tensorboard>=2.6       # engine.processor SummaryWriter
+
+# Image preprocessing in data loader
+opencv-python>=4.5     # data/datasets/make_dataloader.py
+
+# Visualization (used by Frequency.show() and Trans attention-map viz;
+# imported at module top so currently required even if you never call viz)
+matplotlib>=3.3
