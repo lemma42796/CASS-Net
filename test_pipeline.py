@@ -31,10 +31,10 @@ from modeling.make_model import make_model
 
 
 YMLS = [
-    'configs/RGBNT201/EDITOR.yml',
-    'configs/Market1501-MM/EDITOR.yml',
-    'configs/MSVR310/EDITOR.yml',
-    'configs/RGBNT100/EDITOR.yml',
+    'configs/RGBNT201/default.yml',
+    'configs/Market1501-MM/default.yml',
+    'configs/MSVR310/default.yml',
+    'configs/RGBNT100/default.yml',
 ]
 
 NUM_CLASSES = 8
@@ -156,7 +156,7 @@ def test_three_modal_pipeline(yml):
 
 def test_two_modal_pipeline():
     print('[4] 2-modal forward_two_modalities (AL=0)')
-    cfg = _make_cfg('configs/RGBNT201/EDITOR.yml', **{'MODEL.AL': 0})
+    cfg = _make_cfg('configs/RGBNT201/default.yml', **{'MODEL.AL': 0})
     model = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).cpu()
     model.train()
 
@@ -184,7 +184,7 @@ def test_two_modal_pipeline():
 
 def test_save_load_roundtrip():
     print('[5] state_dict save/load round-trip preserves output')
-    cfg = _make_cfg('configs/RGBNT201/EDITOR.yml')
+    cfg = _make_cfg('configs/RGBNT201/default.yml')
     torch.manual_seed(42)
     model = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).cpu()
     model.eval()
@@ -219,7 +219,7 @@ def test_save_load_roundtrip():
 
 def test_ablation_switches():
     print('[6] ablation switches')
-    base_yml = 'configs/RGBNT201/EDITOR.yml'
+    base_yml = 'configs/RGBNT201/default.yml'
     matrix = [
         {'MODEL.AGF': 0, 'MODEL.HSL': 1, 'MODEL.OCFR': 0},
         {'MODEL.AGF': 1, 'MODEL.HSL': 0, 'MODEL.OCFR': 0},

@@ -8,7 +8,7 @@ summary CSV.
 
 Example:
     python tools/run_ablation.py \\
-        --base configs/RGBNT201/EDITOR.yml \\
+        --base configs/RGBNT201/default.yml \\
         --ablation_dir configs/RGBNT201/ablations \\
         --output_dir ablation_results
 """
@@ -65,7 +65,7 @@ def run_variant(train_script, base_yml, overlay_yml, output_dir, python_exe):
 def main():
     parser = argparse.ArgumentParser(description="HTL ablation runner")
     parser.add_argument("--base", required=True, type=str,
-                        help="Base dataset yml (e.g. configs/RGBNT201/EDITOR.yml)")
+                        help="Base dataset yml (e.g. configs/RGBNT201/default.yml)")
     parser.add_argument("--ablation_dir", required=True, type=str,
                         help="Directory containing baseline/hsl_only/agf_only/full.yml")
     parser.add_argument("--output_dir", default="ablation_results", type=str)

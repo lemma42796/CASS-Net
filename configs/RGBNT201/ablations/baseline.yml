@@ -1,5 +1,5 @@
 # Ablation row M1 — HS+FACSS only (paper-faithful HTL minus AGF and HSL).
-# Apply on top of configs/RGBNT201/EDITOR.yml.
+# Apply on top of configs/RGBNT201/default.yml.
 MODEL:
   AGF: 0
   HSL: 0
