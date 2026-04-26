@@ -516,8 +516,6 @@ class Trans(nn.Module):
 
         self.norm = norm_layer(embed_dim)
 
-        # Classifier head
-        self.fc = nn.Linear(embed_dim, 1000) if num_classes > 0 else nn.Identity()
         trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.pos_embed, std=.02)
 
@@ -535,9 +533,6 @@ class Trans(nn.Module):
     @torch.jit.ignore
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
-
-    def get_classifier(self):
-        return self.head
 
     def get_mask(self, img, att_mat):
         # Batch dimension of compression result [layers, heads, patch, patch]
@@ -613,10 +608,6 @@ class Trans(nn.Module):
             elif modes == 3:
                 sign = 'TIR'
             writer.add_figure('Person_Token_Select_' + sign, fig, global_step=epoch)
-
-    def reset_classifier(self, num_classes, global_pool=''):
-        self.num_classes = num_classes
-        self.fc = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward(self, x, camera_id, view_id):
         B = x.shape[0]
