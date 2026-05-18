@@ -59,7 +59,7 @@ def plot_single(ax, pos_sim, neg_sim, title):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EDITOR Cosine Similarity Distribution")
+    parser = argparse.ArgumentParser(description="HTL-ReID Cosine Similarity Distribution")
     parser.add_argument("--features_path", default=None, type=str)
     parser.add_argument("--features_before", default=None, type=str)
     parser.add_argument("--features_after", default=None, type=str)

@@ -10,7 +10,7 @@ _C.MODEL.DEVICE = "cuda"
 # ID number of GPU
 _C.MODEL.DEVICE_ID = '0'
 # Name of model
-_C.MODEL.NAME = 'EDITOR'
+_C.MODEL.NAME = 'HTL-ReID'
 # Margin of triplet loss
 _C.MODEL.MARGIN = 0
 # Path to pretrained model of backbone
@@ -202,4 +202,4 @@ _C.TEST.FEAT_NORM = 'yes'
 # Misc options
 # ---------------------------------------------------------------------------- #
 # Path to checkpoint and saved log of trained model
-_C.OUTPUT_DIR = "./EDITOR"
+_C.OUTPUT_DIR = "./outputs/HTL-ReID"

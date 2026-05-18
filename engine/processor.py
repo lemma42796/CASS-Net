@@ -36,7 +36,7 @@ def do_train(cfg,
     device = "cuda"
     epochs = cfg.SOLVER.MAX_EPOCHS
     logging.getLogger().setLevel(logging.INFO)
-    logger = logging.getLogger("EDITOR.train")
+    logger = logging.getLogger("HTL-ReID.train")
     logger.info('start training')
     # Create SummaryWriter
     writer = SummaryWriter(os.path.join(cfg.OUTPUT_DIR, 'runs'))
@@ -160,7 +160,7 @@ def do_train(cfg,
                         best_index['Rank-1'] = cmc[0]
                         best_index['Rank-5'] = cmc[4]
                         best_index['Rank-10'] = cmc[9]
-                        torch.save(model.state_dict(), os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + 'best.pth'))
+                        torch.save(model.state_dict(), os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_best.pth'))
                     logger.info("Best Multi-Modal mAP: {:.2%}".format(best_index['mAP']))
                     logger.info("Best Multi-Modal Rank-1: {:.2%}".format(best_index['Rank-1']))
                     logger.info("Best Multi-Modal Rank-5: {:.2%}".format(best_index['Rank-5']))
@@ -200,7 +200,7 @@ def do_train(cfg,
                     best_index['Rank-1'] = cmc[0]
                     best_index['Rank-5'] = cmc[4]
                     best_index['Rank-10'] = cmc[9]
-                    torch.save(model.state_dict(), os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + 'best.pth'))
+                    torch.save(model.state_dict(), os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_best.pth'))
                 logger.info("Best Multi-Modal mAP: {:.2%}".format(best_index['mAP']))
                 logger.info("Best Multi-Modal Rank-1: {:.2%}".format(best_index['Rank-1']))
                 logger.info("Best Multi-Modal Rank-5: {:.2%}".format(best_index['Rank-5']))
@@ -219,7 +219,7 @@ def do_inference(cfg,
                  val_loader,
                  num_query):
     device = "cuda"
-    logger = logging.getLogger("EDITOR.test")
+    logger = logging.getLogger("HTL-ReID.test")
     logger.info("Enter inferencing")
 
     if cfg.DATASETS.NAMES == "MSVR310":

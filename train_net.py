@@ -25,7 +25,7 @@ def set_seed(seed):
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description="EDITOR Training")
+    parser = argparse.ArgumentParser(description="HTL-ReID Training")
     parser.add_argument(
         "--config_file", default=[], action='append', type=str,
         help="path to config file; pass multiple times to chain merges "
@@ -51,7 +51,7 @@ if __name__ == '__main__':
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    logger = setup_logger("EDITOR", output_dir, if_train=True)
+    logger = setup_logger("HTL-ReID", output_dir, if_train=True)
     logger.info("Saving model in the path :{}".format(cfg.OUTPUT_DIR))
     logger.info(args)
 

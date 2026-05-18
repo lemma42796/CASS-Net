@@ -2,9 +2,9 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19769558.svg)](https://doi.org/10.5281/zenodo.19769558)
 
-Official implementation of "**Hierarchical Token Learning and Adaptive Gated Fusion for Robust Multi-Modal Object Re-Identification**", submitted to *The Visual Computer*, 2026.
+Official implementation of the manuscript "**Hierarchical Token Learning and Adaptive Gated Fusion for Robust Multi-Modal Object Re-Identification**".
 
-> ⚠️ This code is directly related to the manuscript submitted to *The Visual Computer*.
+> ⚠️ This code is directly related to the HTL-ReID manuscript.
 > If you use this code, please cite our paper.
 
 ## Overview
@@ -62,7 +62,7 @@ If you find this work useful, please cite:
 @article{luo2026htl,
   title   = {Hierarchical Token Learning and Adaptive Gated Fusion for Robust Multi-Modal Object Re-Identification},
   author  = {Luo, Hongbin and Ye, Yihan},
-  journal = {The Visual Computer},
+  note    = {Manuscript},
   year    = {2026}
 }
 ```

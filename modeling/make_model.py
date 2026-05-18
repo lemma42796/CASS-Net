@@ -105,9 +105,9 @@ class build_transformer(nn.Module):
         print('Loading pretrained model for finetuning from {}'.format(model_path))
 
 
-class EDITOR(nn.Module):
+class HTLReID(nn.Module):
     def __init__(self, num_classes, cfg, camera_num, factory):
-        super(EDITOR, self).__init__()
+        super(HTLReID, self).__init__()
         # Three Modalities share the same backbone
         self.BACKBONE = build_transformer(num_classes, cfg, camera_num, factory)
         self.num_patches = int(cfg.INPUT.SIZE_TRAIN[0] // cfg.MODEL.STRIDE_SIZE[0]) * int(
@@ -373,6 +373,6 @@ __factory_T_type = {
 
 
 def make_model(cfg, num_class, camera_num):
-    model = EDITOR(num_class, cfg, camera_num, __factory_T_type)
-    print('===========Building EDITOR===========')
+    model = HTLReID(num_class, cfg, camera_num, __factory_T_type)
+    print('===========Building HTL-ReID===========')
     return model
