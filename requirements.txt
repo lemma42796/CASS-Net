@@ -5,12 +5,13 @@
 # pytorch_wavelets is vendored under ./pytorch_wavelets — do NOT pip install it.
 
 # Core
-torch>=1.10            # torch.linalg.cholesky, torch.diag_embed, torch.quantile
-torchvision>=0.11      # data transforms
+torch>=2.0             # torch.load(weights_only=...), linalg, quantile
+torchvision>=0.15      # data transforms, compatible with torch>=2.0
 numpy>=1.20
 Pillow>=8.0            # data loading + attention-map viz
 PyYAML>=5.4            # yacs reads cfg yml
 yacs>=0.1.8            # config
+setuptools>=60         # pkg_resources used by vendored pytorch_wavelets
 
 # Wavelet transform (pytorch_wavelets/ uses pywt under the hood)
 PyWavelets>=1.1

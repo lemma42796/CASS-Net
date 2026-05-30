@@ -1,11 +1,6 @@
 # HTL-ReID
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19769558.svg)](https://doi.org/10.5281/zenodo.19769558)
-
 Official implementation of the manuscript "**Hierarchical Token Learning and Adaptive Gated Fusion for Robust Multi-Modal Object Re-Identification**".
-
-> ⚠️ This code is directly related to the HTL-ReID manuscript.
-> If you use this code, please cite our paper.
 
 ## Overview
 
@@ -72,31 +67,6 @@ python test_pipeline.py
 ```
 
 The smoke test checks config merging, 3-modal and 2-modal forward/backward passes, save/load round-trip, and ablation switches without real datasets or pretrained weights.
-
-## Citation
-If you find this work useful, please cite:
-
-```bibtex
-@article{luo2026htl,
-  title   = {Hierarchical Token Learning and Adaptive Gated Fusion for Robust Multi-Modal Object Re-Identification},
-  author  = {Luo, Hongbin and Ye, Yihan},
-  note    = {Manuscript},
-  year    = {2026}
-}
-```
-
-Please also cite the archived release:
-
-```bibtex
-@software{htl_reid_zenodo,
-  title     = {HTL-ReID: Hierarchical Token Learning and Adaptive Gated Fusion for Robust Multi-Modal Object Re-Identification},
-  author    = {Luo, Hongbin and Ye, Yihan},
-  year      = {2026},
-  publisher = {Zenodo},
-  doi       = {10.5281/zenodo.19769558},
-  url       = {https://doi.org/10.5281/zenodo.19769558}
-}
-```
 
 ## License
 This project is released under the terms of the [LICENSE](LICENSE) file in this repository.
