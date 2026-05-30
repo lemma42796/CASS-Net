@@ -58,7 +58,7 @@ class TokenWhitening2d(nn.Module):
         # Avoid explicitly inverting ill-conditioned whitening groups under AMP.
         decorrelated = torch.linalg.solve_triangular(chol, flat, upper=False)
         decorrelated = torch.nan_to_num(decorrelated, nan=0.0, posinf=0.0, neginf=0.0)
-        decorrelated = decorrelated.view(c, b, h, w).permute(1, 0, 2, 3).contiguous()
+        decorrelated = decorrelated.reshape(c, b, h, w).permute(1, 0, 2, 3).contiguous()
         return decorrelated.to(orig_dtype)
 
 
