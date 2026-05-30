@@ -70,7 +70,9 @@ def do_train(cfg,
 
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
-    scaler = amp.GradScaler()
+    amp_enabled = bool(getattr(cfg.SOLVER, 'AMP', True))
+    logger.info('AMP enabled: {}'.format(amp_enabled))
+    scaler = amp.GradScaler(enabled=amp_enabled)
 
     best_index = {'mAP': 0, "Rank-1": 0, 'Rank-5': 0, 'Rank-10': 0}
     for epoch in range(1, epochs + 1):
@@ -94,7 +96,7 @@ def do_train(cfg,
             target = vid.to(device)
             target_cam = target_cam.to(device)
             target_view = target_view.to(device)
-            with amp.autocast(enabled=True):
+            with amp.autocast(enabled=amp_enabled):
                 output = model(img, label=target, cam_label=target_cam, view_label=target_view, img_path=imgpath,
                                writer=writer, epoch=epoch)
                 loss = 0
