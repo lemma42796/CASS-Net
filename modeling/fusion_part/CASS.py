@@ -55,8 +55,9 @@ class TokenWhitening2d(nn.Module):
         eye = torch.eye(self.group_size, device=x.device, dtype=x_float.dtype).unsqueeze(0)
         cov = (1.0 - self.eps) * cov + self.eps * eye
         chol = torch.linalg.cholesky(cov)
-        inv_chol = torch.linalg.inv(chol)
-        decorrelated = torch.bmm(inv_chol, flat)
+        # Avoid explicitly inverting ill-conditioned whitening groups under AMP.
+        decorrelated = torch.linalg.solve_triangular(chol, flat, upper=False)
+        decorrelated = torch.nan_to_num(decorrelated, nan=0.0, posinf=0.0, neginf=0.0)
         decorrelated = decorrelated.view(c, b, h, w).permute(1, 0, 2, 3).contiguous()
         return decorrelated.to(orig_dtype)
 
