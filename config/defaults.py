@@ -14,7 +14,8 @@ _C.MODEL.NAME = 'CASS-Net'
 _C.MODEL.METHOD = 'CASS'
 # Margin of triplet loss
 _C.MODEL.MARGIN = 0
-# Path to pretrained model of backbone
+# Path to pretrained model of backbone. Supports local .pth files and
+# timm://model_name sources, e.g. timm://vit_base_patch16_224.augreg2_in21k_ft_in1k
 _C.MODEL.PRETRAIN_PATH_T = 'your_path_to_pretrained_model'
 # Use ImageNet pretrained model to initialize backbone or use self trained model to initialize the whole model
 # Options: 'imagenet' or 'self'

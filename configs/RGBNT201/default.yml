@@ -3,7 +3,7 @@ MODEL:
   METHOD: 'CASS'
   PRETRAIN_CHOICE: 'imagenet'
   MIX_DIM: 768
-  PRETRAIN_PATH_T: 'your_pretrain_model_path'
+  PRETRAIN_PATH_T: 'timm://vit_base_patch16_224.augreg2_in21k_ft_in1k'
   TRANSFORMER_TYPE: 'vit_base_patch16_224'
   STRIDE_SIZE: [ 16, 16 ]
   SIE_CAMERA: True

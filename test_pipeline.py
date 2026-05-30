@@ -24,6 +24,7 @@ Run:
 import copy
 import io
 import sys
+import types
 import torch
 
 from config import cfg as default_cfg
@@ -232,8 +233,41 @@ def test_save_load_roundtrip():
     print('     OK (max abs diff = {:.2e})'.format(diff))
 
 
+def test_timm_pretrain_source_loader():
+    print('[6] timm:// pretrained source loader')
+    from modeling.backbones.vit_pytorch import _load_pretrained_state_dict
+
+    expected_name = 'vit_base_patch16_224.augreg2_in21k_ft_in1k'
+
+    class FakeTimmModel:
+        def state_dict(self):
+            return {
+                'cls_token': torch.ones(1, 1, 768),
+                'head.weight': torch.ones(1000, 768),
+            }
+
+    def create_model(name, pretrained=True):
+        assert name == expected_name
+        assert pretrained is True
+        return FakeTimmModel()
+
+    old_timm = sys.modules.get('timm')
+    sys.modules['timm'] = types.SimpleNamespace(create_model=create_model)
+    try:
+        state = _load_pretrained_state_dict('timm://{}'.format(expected_name))
+    finally:
+        if old_timm is None:
+            del sys.modules['timm']
+        else:
+            sys.modules['timm'] = old_timm
+
+    assert state['cls_token'].shape == (1, 1, 768)
+    assert state['head.weight'].shape == (1000, 768)
+    print('     OK')
+
+
 def test_ablation_switches():
-    print('[6] ablation switches')
+    print('[7] ablation switches')
     base_yml = 'configs/RGBNT201/default.yml'
     matrix = [
         {'MODEL.AGF': 0, 'MODEL.OCFR': 0},
@@ -254,7 +288,7 @@ def test_ablation_switches():
 
 
 def test_nga_memory_stabilization():
-    print('[7] NGA memory warmup+EMA+prototype')
+    print('[8] NGA memory warmup+EMA+prototype')
     cfg = _make_cfg(
         'configs/RGBNT201/default.yml',
         **{
@@ -292,6 +326,7 @@ def main():
         test_three_modal_pipeline(y)
     test_two_modal_pipeline()
     test_save_load_roundtrip()
+    test_timm_pretrain_source_loader()
     test_ablation_switches()
     test_nga_memory_stabilization()
     print('\n=== ALL PIPELINE TESTS PASSED ===')

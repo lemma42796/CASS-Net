@@ -32,6 +32,30 @@ import torch.nn.functional as F
 import collections.abc as container_abcs
 from modeling.fusion_part.OCFR import OCFR
 
+
+def _load_pretrained_state_dict(model_path):
+    source = str(model_path)
+    if source.startswith('timm://'):
+        model_name = source[len('timm://'):]
+        if not model_name:
+            raise ValueError('Empty timm pretrained model name: {}'.format(source))
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError(
+                'MODEL.PRETRAIN_PATH_T={} requires timm. Install it with '
+                '`pip install timm huggingface_hub safetensors`.'.format(source)
+            ) from exc
+        model = timm.create_model(model_name, pretrained=True)
+        return model.state_dict()
+
+    param_dict = torch.load(model_path, map_location='cpu')
+    if 'model' in param_dict:
+        param_dict = param_dict['model']
+    if 'state_dict' in param_dict:
+        param_dict = param_dict['state_dict']
+    return param_dict
+
 # From PyTorch internals
 def _ntuple(n):
     def parse(x):
@@ -633,13 +657,12 @@ class Trans(nn.Module):
         return x, attn_list
 
     def load_param(self, model_path):
-        param_dict = torch.load(model_path, map_location='cpu')
-        if 'model' in param_dict:
-            param_dict = param_dict['model']
-        if 'state_dict' in param_dict:
-            param_dict = param_dict['state_dict']
+        param_dict = _load_pretrained_state_dict(model_path)
+        model_dict = self.state_dict()
+        loaded, skipped = [], []
         for k, v in param_dict.items():
             if 'head' in k or 'dist' in k:
+                skipped.append(k)
                 continue
             if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
                 # For old resnest that I trained prior to conv based patchification
@@ -647,17 +670,24 @@ class Trans(nn.Module):
                 v = v.reshape(O, -1, H, W)
             elif k == 'pos_embed' and v.shape != self.pos_embed.shape:
                 # To resize pos embedding when using model at different size from pretrained weights
-                if 'distilled' in model_path:
+                if 'distilled' in str(model_path):
                     print('distill need to choose right cls token in the pth')
                     v = torch.cat([v[:, 0:1], v[:, 2:]], dim=1)
                 v = resize_pos_embed(v, self.pos_embed, self.patch_embed.num_y, self.patch_embed.num_x)
+            if k not in model_dict:
+                skipped.append(k)
+                continue
             try:
-                self.state_dict()[k].copy_(v)
-            except:
-                print('===========================ERROR=========================')
-                print('shape do not match in k :{}: param_dict{} vs self.state_dict(){}'.format(k, v.shape,
-                                                                                                self.state_dict()[
-                                                                                                    k].shape))
+                model_dict[k].copy_(v)
+                loaded.append(k)
+            except Exception as exc:
+                skipped.append(k)
+                print('WARNING: skip key {}: checkpoint {} vs model {} ({})'.format(
+                    k, v.shape, model_dict[k].shape, exc))
+        print('Loading pretrained ImageNet model......from {}'.format(model_path))
+        print('  Loaded {}/{} backbone keys'.format(len(loaded), len(model_dict)))
+        if skipped:
+            print('  Skipped {} keys'.format(len(skipped)))
 
 
 def resize_pos_embed(posemb, posemb_new, hight, width):

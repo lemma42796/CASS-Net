@@ -12,6 +12,9 @@ Pillow>=8.0            # data loading + attention-map viz
 PyYAML>=5.4            # yacs reads cfg yml
 yacs>=0.1.8            # config
 setuptools>=60         # pkg_resources used by vendored pytorch_wavelets
+timm>=0.9              # optional MODEL.PRETRAIN_PATH_T timm://... loader
+huggingface_hub>=0.20  # timm HF Hub pretrained weights
+safetensors>=0.4       # HF Hub tensor checkpoints
 
 # Wavelet transform (pytorch_wavelets/ uses pywt under the hood)
 PyWavelets>=1.1

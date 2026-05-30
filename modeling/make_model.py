@@ -115,7 +115,6 @@ class build_transformer(nn.Module):
 
         if pretrain_choice == 'imagenet':
             self.base.load_param(model_path)
-            print('Loading pretrained ImageNet model......from {}'.format(model_path))
 
         self.ID_LOSS_TYPE = cfg.MODEL.ID_LOSS_TYPE
 
