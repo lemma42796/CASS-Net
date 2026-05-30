@@ -21,6 +21,8 @@ for some einops/einsum fun
 Hacked together by / Copyright 2020 Ross Wightman
 """
 import math
+import os
+from pathlib import Path
 from functools import partial
 from itertools import repeat
 import matplotlib.pyplot as plt
@@ -31,6 +33,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 import collections.abc as container_abcs
 from modeling.fusion_part.OCFR import OCFR
+
+
+def _resolve_local_pretrained_path(model_path):
+    path = Path(os.path.expandvars(os.path.expanduser(str(model_path))))
+    if not path.is_dir():
+        return path
+
+    preferred_names = [
+        'model.safetensors',
+        'pytorch_model.bin',
+        'pytorch_model.pth',
+        'checkpoint.pth',
+        'model.pth',
+    ]
+    for name in preferred_names:
+        candidate = path / name
+        if candidate.is_file():
+            return candidate
+
+    candidates = []
+    for pattern in ('*.safetensors', '*.bin', '*.pth', '*.pt', '*.ckpt'):
+        candidates.extend(sorted(path.glob(pattern)))
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError(
+            'No pretrained checkpoint file found in directory {}'.format(path)
+        )
+    raise ValueError(
+        'Multiple pretrained checkpoint files found in directory {}: {}'.format(
+            path, ', '.join(str(p.name) for p in candidates)
+        )
+    )
 
 
 def _load_pretrained_state_dict(model_path):
@@ -49,7 +85,21 @@ def _load_pretrained_state_dict(model_path):
         model = timm.create_model(model_name, pretrained=True)
         return model.state_dict()
 
-    param_dict = torch.load(model_path, map_location='cpu')
+    local_path = _resolve_local_pretrained_path(model_path)
+    if local_path.suffix.lower() == '.safetensors':
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise ImportError(
+                'MODEL.PRETRAIN_PATH_T={} requires safetensors. Install it with '
+                '`pip install safetensors`.'.format(local_path)
+            ) from exc
+        param_dict = load_file(str(local_path))
+    else:
+        try:
+            param_dict = torch.load(str(local_path), map_location='cpu', weights_only=True)
+        except TypeError:
+            param_dict = torch.load(str(local_path), map_location='cpu')
     if 'model' in param_dict:
         param_dict = param_dict['model']
     if 'state_dict' in param_dict:

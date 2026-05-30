@@ -14,9 +14,10 @@ Coverage:
   5. 3-modal eval forward
   6. 2-modal forward_two_modalities (RGBN300-style path)
   7. Backward populates non-NaN gradients on every trainable parameter
-  8. Loss assembly matches engine/processor.py's odd/even pairing rule
-  9. state_dict save -> reload -> identical forward output
- 10. Ablation switches (AGF=0, OCFR=1) each produce a usable model
+ 8. Loss assembly matches engine/processor.py's odd/even pairing rule
+ 9. state_dict save -> reload -> identical forward output
+ 10. local/timm pretrained source loader
+ 11. Ablation switches (AGF=0, OCFR=1) each produce a usable model
 
 Run:
     python3 test_pipeline.py
@@ -266,8 +267,52 @@ def test_timm_pretrain_source_loader():
     print('     OK')
 
 
+def test_local_pretrain_source_loader():
+    print('[7] local pretrained source loader')
+    from pathlib import Path
+    import tempfile
+    from modeling.backbones.vit_pytorch import _load_pretrained_state_dict
+
+    with tempfile.TemporaryDirectory() as td:
+        bin_path = Path(td) / 'pytorch_model.bin'
+        torch.save({'model': {'cls_token': torch.ones(1, 1, 768)}}, str(bin_path))
+        state = _load_pretrained_state_dict(td)
+        assert state['cls_token'].shape == (1, 1, 768)
+
+    expected = {'pos_embed': torch.ones(1, 197, 768)}
+
+    def load_file(path):
+        assert path.endswith('model.safetensors')
+        return expected
+
+    old_pkg = sys.modules.get('safetensors')
+    old_mod = sys.modules.get('safetensors.torch')
+    safetensors_pkg = types.ModuleType('safetensors')
+    safetensors_torch = types.ModuleType('safetensors.torch')
+    safetensors_torch.load_file = load_file
+    sys.modules['safetensors'] = safetensors_pkg
+    sys.modules['safetensors.torch'] = safetensors_torch
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            safe_path = Path(td) / 'model.safetensors'
+            safe_path.write_bytes(b'fake')
+            state = _load_pretrained_state_dict(td)
+    finally:
+        if old_pkg is None:
+            del sys.modules['safetensors']
+        else:
+            sys.modules['safetensors'] = old_pkg
+        if old_mod is None:
+            del sys.modules['safetensors.torch']
+        else:
+            sys.modules['safetensors.torch'] = old_mod
+
+    assert state['pos_embed'].shape == (1, 197, 768)
+    print('     OK')
+
+
 def test_ablation_switches():
-    print('[7] ablation switches')
+    print('[8] ablation switches')
     base_yml = 'configs/RGBNT201/default.yml'
     matrix = [
         {'MODEL.AGF': 0, 'MODEL.OCFR': 0},
@@ -327,6 +372,7 @@ def main():
     test_two_modal_pipeline()
     test_save_load_roundtrip()
     test_timm_pretrain_source_loader()
+    test_local_pretrain_source_loader()
     test_ablation_switches()
     test_nga_memory_stabilization()
     print('\n=== ALL PIPELINE TESTS PASSED ===')

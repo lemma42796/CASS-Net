@@ -101,14 +101,16 @@ class HypergraphConv2d(nn.Module):
                 'expected [B, {}, {}, {}], got {}'.format(
                     self.dim, self.feat_h, self.feat_w, tuple(x.shape)))
 
-        phi = self.phi_conv(x).permute(0, 2, 3, 1).contiguous()
+        orig_dtype = x.dtype
+        x_float = x.float()
+        phi = self.phi_conv(x).float().permute(0, 2, 3, 1).contiguous()
         phi = phi.view(b, self.vertices, self.filters)
 
         metric = F.adaptive_avg_pool2d(x, output_size=(1, 1))
-        metric = self.metric_conv(metric).view(b, self.filters)
+        metric = self.metric_conv(metric).float().view(b, self.filters)
         metric = torch.diag_embed(metric)
 
-        assign = self.assign_conv(x).permute(0, 2, 3, 1).contiguous()
+        assign = self.assign_conv(x).float().permute(0, 2, 3, 1).contiguous()
         assign = assign.view(b, self.vertices, self.edges)
 
         incidence = torch.matmul(phi, torch.matmul(metric, torch.matmul(phi.transpose(1, 2), assign))).abs()
@@ -117,18 +119,18 @@ class HypergraphConv2d(nn.Module):
             incidence = torch.where(incidence < threshold, torch.zeros_like(incidence), incidence)
 
         node_degree = incidence.sum(dim=2)
-        incidence_norm = node_degree.add(1e-10).pow(-0.5).unsqueeze(-1) * incidence
+        incidence_norm = node_degree.clamp_min(1e-6).pow(-0.5).unsqueeze(-1) * incidence
         edge_degree = incidence.sum(dim=1)
-        edge_degree = torch.diag_embed(edge_degree.add(1e-10).pow(-1.0))
+        edge_degree = torch.diag_embed(edge_degree.clamp_min(1e-6).pow(-1.0))
 
-        features = x.permute(0, 2, 3, 1).contiguous().view(b, self.vertices, self.dim)
+        features = x_float.permute(0, 2, 3, 1).contiguous().view(b, self.vertices, self.dim)
         propagated = torch.matmul(incidence_norm, torch.matmul(edge_degree, torch.matmul(
             incidence_norm.transpose(1, 2), features)))
-        out = torch.matmul(features - propagated, self.weight)
+        out = torch.matmul(features - propagated, self.weight.float())
         if self.bias is not None:
-            out = out + self.bias
+            out = out + self.bias.float()
         out = out.permute(0, 2, 1).contiguous().view(b, self.dim, self.feat_h, self.feat_w)
-        return out
+        return out.to(orig_dtype)
 
 
 class HighOrderStructureSynergy(nn.Module):
@@ -412,9 +414,11 @@ class DynamicCollaborativeSelector(nn.Module):
 
     @staticmethod
     def _minmax(score, eps=1e-8):
-        lo = score.min(dim=1, keepdim=True).values
-        hi = score.max(dim=1, keepdim=True).values
-        return (score - lo) / (hi - lo + eps)
+        orig_dtype = score.dtype
+        score_float = score.float()
+        lo = score_float.min(dim=1, keepdim=True).values
+        hi = score_float.max(dim=1, keepdim=True).values
+        return ((score_float - lo) / (hi - lo).clamp_min(eps)).to(orig_dtype)
 
     def _topk_bounds(self, num_tokens):
         base = max(1, min(self.topk, num_tokens))
