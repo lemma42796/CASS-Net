@@ -1,5 +1,0 @@
-# Ablation row M3 — HS+FACSS + AGF (no HSL).
-# Apply on top of configs/RGBNT201/default.yml.
-MODEL:
-  AGF: 1
-  HSL: 0

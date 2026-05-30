@@ -242,15 +242,20 @@ def val_collate_fn(batch):
 
 
 def make_dataloader(cfg):
-    train_transforms = T.Compose([
+    train_transform_ops = [
         T.Resize(cfg.INPUT.SIZE_TRAIN, interpolation=3),
         T.RandomHorizontalFlip(p=cfg.INPUT.PROB),
         T.Pad(cfg.INPUT.PADDING),
         T.RandomCrop(cfg.INPUT.SIZE_TRAIN),
+    ]
+    if cfg.INPUT.GRAY_REPLACE_PROB > 0:
+        train_transform_ops.append(RandomGrayscalePatchReplacement(probability=cfg.INPUT.GRAY_REPLACE_PROB))
+    train_transform_ops.extend([
         T.ToTensor(),
         T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD),
         RandomErasing(probability=cfg.INPUT.RE_PROB, mode='pixel', max_count=1, device='cpu'),
     ])
+    train_transforms = T.Compose(train_transform_ops)
 
     val_transforms = T.Compose([
         T.Resize(cfg.INPUT.SIZE_TEST),

@@ -73,6 +73,10 @@ class HSFACSS(nn.Module):
             k=cfg.MODEL.HS_K,
         )
         self.facss_k = cfg.MODEL.FACSS_K
+        self.dynamic_k = bool(cfg.MODEL.FACSS_DYNAMIC_K)
+        self.facss_min_k = cfg.MODEL.FACSS_MIN_K
+        self.facss_max_k = cfg.MODEL.FACSS_MAX_K
+        self.soft_residual_weight = float(cfg.MODEL.FACSS_SOFT_RESIDUAL_WEIGHT)
         self.cross_pool = cfg.MODEL.FACSS_CROSS_POOL
         self.cross_topk = cfg.MODEL.FACSS_CROSS_TOPK
         self.cross_lse_tau = cfg.MODEL.FACSS_CROSS_LSE_TAU
@@ -90,6 +94,16 @@ class HSFACSS(nn.Module):
             nn.Linear(hidden, 1),
         )
         nn.init.zeros_(self.alpha_mlp[-1].bias)         # initial alpha ~= 0.5
+
+        k_hidden = cfg.MODEL.FACSS_K_HIDDEN
+        self.k_mlp = nn.Sequential(
+            nn.LayerNorm(4 * dim + 1),
+            nn.Linear(4 * dim + 1, k_hidden),
+            nn.GELU(),
+            nn.Linear(k_hidden, 1),
+        )
+        nn.init.zeros_(self.k_mlp[-1].weight)
+        nn.init.zeros_(self.k_mlp[-1].bias)
 
     @staticmethod
     def _normalize(s, mode, mask=None, eps=1e-6):
@@ -145,10 +159,11 @@ class HSFACSS(nn.Module):
             out = out * mask.to(out.dtype)
         return out
 
-    def _cross_score(self, p_feats, others_feats):
+    def _cross_score(self, p_feats, others_feats, others_quality=None):
         """
         p_feats: [B, N, D] modality m's full patch features at layer 12.
         others_feats: list of [B, N, D] other-modality patch features.
+        others_quality: optional list of [B] or [B, 1] quality scores.
         Returns S_cross: [B, N].
         """
         p_norm = F.normalize(p_feats, dim=-1)
@@ -168,7 +183,18 @@ class HSFACSS(nn.Module):
             else:
                 raise ValueError(self.cross_pool)
             scores.append(pooled)
-        return torch.stack(scores, dim=0).mean(dim=0)              # [B, N]
+        stacked = torch.stack(scores, dim=1)                       # [B, O, N]
+        if others_quality is None:
+            return stacked.mean(dim=1)                             # [B, N]
+
+        weights = []
+        for q in others_quality:
+            if q.dim() == 1:
+                q = q.unsqueeze(-1)
+            weights.append(q)
+        weights = torch.stack(weights, dim=1).clamp_min(0.0)       # [B, O, 1]
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-6)
+        return (stacked * weights).sum(dim=1)                      # [B, N]
 
     def _alpha(self, cls_list, p_feats=None):
         """
@@ -185,8 +211,30 @@ class HSFACSS(nn.Module):
         inp = torch.cat([p_feats, ctx_exp], dim=-1)                # [B, N, (k+1)D]
         return torch.sigmoid(self.alpha_mlp(inp).squeeze(-1))      # [B, N]
 
+    def _predict_k(self, m_cls, cls_list, modality_quality, n_tokens):
+        if not self.dynamic_k:
+            k = min(self.facss_k, n_tokens)
+            k_each = torch.full((m_cls.size(0),), k, dtype=torch.long, device=m_cls.device)
+            ratio = torch.ones(m_cls.size(0), dtype=m_cls.dtype, device=m_cls.device)
+            return k_each, ratio
+
+        if modality_quality is None:
+            modality_quality = torch.full((m_cls.size(0), 1), 0.5,
+                                          dtype=m_cls.dtype, device=m_cls.device)
+        elif modality_quality.dim() == 1:
+            modality_quality = modality_quality.unsqueeze(-1)
+
+        ctx = torch.cat(cls_list, dim=-1)
+        ratio = torch.sigmoid(self.k_mlp(torch.cat([m_cls, ctx, modality_quality], dim=-1))).squeeze(-1)
+        min_k = min(self.facss_min_k, n_tokens)
+        max_k = min(max(self.facss_max_k, min_k), n_tokens)
+        k_float = min_k + (max_k - min_k) * ratio
+        k_each = k_float.round().long().clamp(min=min_k, max=max_k)
+        return k_each, ratio
+
     def _select_one_modality(self, m_feat, m_attn, others_full,
-                             cls_list, mask_fre):
+                             cls_list, mask_fre, others_quality=None,
+                             modality_quality=None):
         """
         Run HS + FACSS for one modality.
         m_feat: [B, M, D] full token sequence (cls + N patches).
@@ -206,7 +254,8 @@ class HSFACSS(nn.Module):
         if mask_fre is not None:
             cand_mask = cand_mask | mask_fre.bool()
 
-        s_cross_full = self._cross_score(patches, others_full)     # [B, N]
+        s_cross_full = self._cross_score(
+            patches, others_full, others_quality=others_quality)   # [B, N]
 
         s_self_norm = self._normalize(s_self_full, self.norm_mode, mask=cand_mask)
         s_cross_norm = self._normalize(s_cross_full, self.norm_mode, mask=cand_mask)
@@ -222,11 +271,12 @@ class HSFACSS(nn.Module):
         very_neg = torch.finfo(s_facss.dtype).min
         s_facss = torch.where(cand_mask, s_facss, torch.full_like(s_facss, very_neg))
 
-        # Per-sample candidate counts may be < facss_k → clamp k accordingly
-        k = min(self.facss_k, N)
-        topk_idx = s_facss.topk(k, dim=1).indices                  # [B, k]
         sel_mask = torch.zeros(B, N, dtype=torch.bool, device=patches.device)
-        sel_mask.scatter_(1, topk_idx, True)
+        k_each, k_ratio = self._predict_k(cls_token.squeeze(1), cls_list, modality_quality, N)
+        for b in range(B):
+            k_b = int(k_each[b].item())
+            topk_idx = s_facss[b].topk(k_b, dim=0).indices
+            sel_mask[b].scatter_(0, topk_idx, True)
 
         # Build the gating tensor applied to patches.
         # STE: forward = hard sel_mask; backward = softmax over candidate scores
@@ -236,7 +286,11 @@ class HSFACSS(nn.Module):
             soft = F.softmax(s_facss / self.ste_tau, dim=1)        # [B, N]
             gate = sel_mask_f + soft - soft.detach()
         else:
+            soft = F.softmax(s_facss / self.ste_tau, dim=1)
             gate = sel_mask_f
+        if self.soft_residual_weight > 0:
+            soft_scale = 0.5 + k_ratio.unsqueeze(-1)
+            gate = gate + self.soft_residual_weight * soft_scale * soft * (1.0 - sel_mask_f)
 
         feat_out = torch.cat(
             [cls_token, patches * gate.unsqueeze(-1)],
@@ -246,7 +300,8 @@ class HSFACSS(nn.Module):
 
     def forward(self, RGB_feat, RGB_attn, NIR_feat=None, NIR_attn=None,
                 TIR_feat=None, TIR_attn=None, img_path=None,
-                writer=None, epoch=None, mask_fre=None):
+                writer=None, epoch=None, mask_fre=None,
+                quality_scores=None):
         cls_rgb = RGB_feat[:, 0, :]
         patches_rgb = RGB_feat[:, 1:, :]
 
@@ -263,13 +318,26 @@ class HSFACSS(nn.Module):
         while len(cls_list) < 3:
             cls_list.append(torch.zeros_like(cls_list[0]))
         full_patches = {m[0]: m[3] for m in modalities}
+        quality = None
+        if quality_scores is not None:
+            quality = {
+                'RGB': quality_scores[:, 0],
+                'NIR': quality_scores[:, 1],
+                'TIR': quality_scores[:, 2],
+            }
 
         outs = {}
         masks = {}
         for name, feat, attn, _, _ in modalities:
             others = [full_patches[k] for k in full_patches if k != name]
+            others_quality = None
+            modality_quality = None
+            if quality is not None:
+                others_quality = [quality[k] for k in full_patches if k != name]
+                modality_quality = quality[name]
             feat_out, sel_mask = self._select_one_modality(
-                feat, attn, others, cls_list, mask_fre,
+                feat, attn, others, cls_list, mask_fre, others_quality,
+                modality_quality,
             )
             outs[name] = feat_out
             masks[name] = sel_mask

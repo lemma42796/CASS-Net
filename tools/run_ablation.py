@@ -2,9 +2,8 @@
 One-click runner for the HTL ablation study.
 
 For each variant, invokes train_net.py with the base dataset config plus
-an ablation overlay yml that flips the AGF / HSL switches. After all runs
-finish, parses train_log.txt from each output dir and prints / writes a
-summary CSV.
+an ablation overlay yml that flips the AGF switch. After all runs finish,
+parses train_log.txt from each output dir and prints / writes a summary CSV.
 
 Example:
     python tools/run_ablation.py \\
@@ -23,9 +22,7 @@ import sys
 # Order here controls the variants run and the row order in the summary.
 VARIANTS = [
     ('baseline', 'baseline.yml', 'Baseline (HS+FACSS only)'),
-    ('hsl_only', 'hsl_only.yml', '+HSL'),
-    ('agf_only', 'agf_only.yml', '+AGF'),
-    ('full',     'full.yml',     'Full (AGF+HSL)'),
+    ('full',     'full.yml',     'Full (HS+FACSS+AGF)'),
 ]
 
 
@@ -67,7 +64,7 @@ def main():
     parser.add_argument("--base", required=True, type=str,
                         help="Base dataset yml (e.g. configs/RGBNT201/default.yml)")
     parser.add_argument("--ablation_dir", required=True, type=str,
-                        help="Directory containing baseline/hsl_only/agf_only/full.yml")
+                        help="Directory containing baseline/full.yml")
     parser.add_argument("--output_dir", default="ablation_results", type=str)
     parser.add_argument("--python", default=sys.executable, type=str)
     args = parser.parse_args()

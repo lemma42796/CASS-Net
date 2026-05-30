@@ -16,7 +16,7 @@ Coverage:
   7. Backward populates non-NaN gradients on every trainable parameter
   8. Loss assembly matches engine/processor.py's odd/even pairing rule
   9. state_dict save -> reload -> identical forward output
- 10. Ablation switches (AGF=0, HSL=0, OCFR=1) each produce a usable model
+ 10. Ablation switches (AGF=0, OCFR=1) each produce a usable model
 
 Run:
     python3 test_pipeline.py
@@ -47,6 +47,8 @@ def _make_cfg(yml=None, **overrides):
         c.merge_from_file(yml)
     c.MODEL.PRETRAIN_CHOICE = 'self'        # skip ImageNet weight load
     c.MODEL.SIE_CAMERA = False              # avoid camera_num plumbing in tests
+    c.INPUT.SIZE_TRAIN = [128, 64]           # keep CPU smoke tests quick
+    c.INPUT.SIZE_TEST = [128, 64]
     for k, v in overrides.items():
         # supports dotted MODEL.XYZ overrides
         node = c
@@ -84,7 +86,6 @@ def test_defaults_load():
     c = default_cfg.clone()
     c.freeze()
     assert c.MODEL.AGF in (0, 1)
-    assert c.MODEL.HSL in (0, 1)
     print('     OK')
 
 
@@ -94,8 +95,8 @@ def test_yml_configs_merge():
         c = default_cfg.clone()
         c.merge_from_file(y)
         c.freeze()
-        print('     OK: {}  AGF={} HSL={} AL={}'.format(
-            y, c.MODEL.AGF, c.MODEL.HSL, c.MODEL.AL))
+        print('     OK: {}  AGF={} AL={}'.format(
+            y, c.MODEL.AGF, c.MODEL.AL))
 
 
 def test_three_modal_pipeline(yml):
@@ -110,9 +111,10 @@ def test_three_modal_pipeline(yml):
     output = model(x, cam_label=None, label=label, epoch=0)
     assert isinstance(output, tuple), 'expected tuple, got {}'.format(type(output))
 
-    # AL=1: (score, cls4t, ori_score, ori, loss_aux) = 5
-    # AL=0: (score, cls4t, RGB_s, RGB_f, NIR_s, NIR_f, TIR_s, TIR_f, loss_aux) = 9
-    expected_len = 5 if cfg.MODEL.AL else 9
+    # AL=1: (score, cls4t, ori_score, ori, part_score, part_feat, loss_aux) = 7
+    # AL=0: (score, cls4t, RGB_s, RGB_f, NIR_s, NIR_f, TIR_s, TIR_f,
+    #        part_score, part_feat, loss_aux) = 11
+    expected_len = 7 if cfg.MODEL.AL else 11
     assert len(output) == expected_len, 'expected {} outputs, got {}'.format(
         expected_len, len(output))
 
@@ -164,8 +166,9 @@ def test_two_modal_pipeline():
     label = torch.randint(0, NUM_CLASSES, (BATCH,))
     output = model.forward_two_modalities(x, cam_label=None, label=label, epoch=0)
 
-    # AL=0 2-modal: (score, cls4t, RGB_s, RGB_f, NIR_s, NIR_f, loss_aux) = 7
-    assert len(output) == 7, 'expected 7 outputs, got {}'.format(len(output))
+    # AL=0 2-modal: (score, cls4t, RGB_s, RGB_f, NIR_s, NIR_f,
+    #                 part_score, part_feat, loss_aux) = 9
+    assert len(output) == 9, 'expected 9 outputs, got {}'.format(len(output))
     score, cls4t = output[0], output[1]
     assert score.shape == (BATCH, NUM_CLASSES)
     assert cls4t.shape == (BATCH, 3 * model.BACKBONE.token_dim)
@@ -221,9 +224,8 @@ def test_ablation_switches():
     print('[6] ablation switches')
     base_yml = 'configs/RGBNT201/default.yml'
     matrix = [
-        {'MODEL.AGF': 0, 'MODEL.HSL': 1, 'MODEL.OCFR': 0},
-        {'MODEL.AGF': 1, 'MODEL.HSL': 0, 'MODEL.OCFR': 0},
-        {'MODEL.AGF': 1, 'MODEL.HSL': 1, 'MODEL.OCFR': 1},
+        {'MODEL.AGF': 0, 'MODEL.OCFR': 0},
+        {'MODEL.AGF': 1, 'MODEL.OCFR': 1},
     ]
     for m in matrix:
         cfg = _make_cfg(base_yml, **m)
@@ -235,8 +237,8 @@ def test_ablation_switches():
         loss = _loss_assembly_like_processor(out)
         loss.backward()
         n_params = sum(p.numel() for p in model.parameters()) / 1e6
-        print('     OK  AGF={} HSL={} OCFR={}  params={:.2f}M'.format(
-            m['MODEL.AGF'], m['MODEL.HSL'], m['MODEL.OCFR'], n_params))
+        print('     OK  AGF={} OCFR={}  params={:.2f}M'.format(
+            m['MODEL.AGF'], m['MODEL.OCFR'], n_params))
 
 
 def main():

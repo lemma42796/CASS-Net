@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from modeling.backbones.vit_pytorch import vit_base_patch16_224, vit_small_patch16_224, \
     deit_small_patch16_224
@@ -7,7 +8,6 @@ from modeling.fusion_part.Frequency import Frequency_based_Token_Selection
 from modeling.fusion_part.OCFR import OCFR
 from modeling.fusion_part.HS_FACSS import HSFACSS
 from modeling.fusion_part.AGF import AGF
-from modeling.fusion_part.HSL import HSLModule
 
 
 def weights_init_kaiming(m):
@@ -32,6 +32,56 @@ def weights_init_classifier(m):
         nn.init.normal_(m.weight, std=0.001)
         if m.bias:
             nn.init.constant_(m.bias, 0.0)
+
+
+class ModalityQualityHead(nn.Module):
+    """Predict nighttime modality reliability for RGB/NIR/TIR features."""
+
+    def __init__(self, dim, hidden, prior, min_score):
+        super().__init__()
+        prior = torch.tensor(prior, dtype=torch.float32).clamp(1e-4, 1 - 1e-4)
+        prior_logit = torch.log(prior / (1.0 - prior))
+        self.register_buffer('prior_logit', prior_logit.view(1, 3))
+        self.min_score = float(min_score)
+        self.net = nn.Sequential(
+            nn.LayerNorm(3 * dim),
+            nn.Linear(3 * dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 3),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, rgb_cls, nir_cls, tir_cls=None):
+        if tir_cls is None:
+            tir_cls = torch.zeros_like(rgb_cls)
+            available = torch.tensor([1.0, 1.0, 0.0], device=rgb_cls.device, dtype=rgb_cls.dtype)
+        else:
+            available = torch.ones(3, device=rgb_cls.device, dtype=rgb_cls.dtype)
+        ctx = torch.cat([rgb_cls, nir_cls, tir_cls], dim=-1)
+        prior_logit = self.prior_logit.to(device=ctx.device, dtype=ctx.dtype)
+        score = torch.sigmoid(self.net(ctx) + prior_logit)
+        score = self.min_score + (1.0 - self.min_score) * score
+        return score * available.view(1, 3)
+
+
+class ModalityAdapter(nn.Module):
+    """Small residual adapter for modality-specific statistics after shared ViT."""
+
+    def __init__(self, dim, hidden, scale):
+        super().__init__()
+        self.scale = float(scale)
+        self.adapter = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, dim),
+        )
+        nn.init.zeros_(self.adapter[-1].weight)
+        nn.init.zeros_(self.adapter[-1].bias)
+
+    def forward(self, x):
+        return x + self.scale * self.adapter(x)
 
 
 class build_transformer(nn.Module):
@@ -110,31 +160,46 @@ class HTLReID(nn.Module):
         super(HTLReID, self).__init__()
         # Three Modalities share the same backbone
         self.BACKBONE = build_transformer(num_classes, cfg, camera_num, factory)
-        self.num_patches = int(cfg.INPUT.SIZE_TRAIN[0] // cfg.MODEL.STRIDE_SIZE[0]) * int(
-            cfg.INPUT.SIZE_TRAIN[1] // cfg.MODEL.STRIDE_SIZE[1])
+        self.feat_h = int(cfg.INPUT.SIZE_TRAIN[0] // cfg.MODEL.STRIDE_SIZE[0])
+        self.feat_w = int(cfg.INPUT.SIZE_TRAIN[1] // cfg.MODEL.STRIDE_SIZE[1])
+        self.num_patches = self.feat_h * self.feat_w
         self.HS_FACSS = HSFACSS(dim=self.BACKBONE.token_dim, cfg=cfg)
         self.FREQ_INDEX = Frequency_based_Token_Selection(keep=cfg.MODEL.FREQUENCY_KEEP,
                                                           stride=cfg.MODEL.STRIDE_SIZE[0])
         self.use_agf = cfg.MODEL.AGF
-        self.use_hsl = cfg.MODEL.HSL
         self.use_ocfr = bool(cfg.MODEL.OCFR)
+        self.use_quality = bool(cfg.MODEL.QUALITY_AWARE)
+        self.use_adapter = bool(cfg.MODEL.MODALITY_ADAPTER)
+        self.use_part = bool(cfg.MODEL.PART_BRANCH)
+        self.part_num = int(cfg.MODEL.PART_NUM)
+        self.modality_drop_prob = float(cfg.INPUT.MODALITY_DROP_PROB)
+        self.align_loss_weight = float(cfg.MODEL.ALIGN_LOSS_WEIGHT)
+        self.token_consistency_weight = float(cfg.MODEL.TOKEN_CONSISTENCY_WEIGHT)
+        self.gate_balance_weight = float(cfg.MODEL.GATE_BALANCE_WEIGHT)
 
         if self.use_agf:
             self.AGF = AGF(dim=self.BACKBONE.token_dim, num_heads=cfg.MODEL.AGF_NUM_HEADS)
+        if self.use_adapter:
+            self.MODALITY_ADAPTERS = nn.ModuleDict({
+                'RGB': ModalityAdapter(self.BACKBONE.token_dim,
+                                       cfg.MODEL.MODALITY_ADAPTER_DIM,
+                                       cfg.MODEL.MODALITY_ADAPTER_SCALE),
+                'NIR': ModalityAdapter(self.BACKBONE.token_dim,
+                                       cfg.MODEL.MODALITY_ADAPTER_DIM,
+                                       cfg.MODEL.MODALITY_ADAPTER_SCALE),
+                'TIR': ModalityAdapter(self.BACKBONE.token_dim,
+                                       cfg.MODEL.MODALITY_ADAPTER_DIM,
+                                       cfg.MODEL.MODALITY_ADAPTER_SCALE),
+            })
+        if self.use_quality:
+            self.QUALITY_HEAD = ModalityQualityHead(
+                dim=self.BACKBONE.token_dim,
+                hidden=cfg.MODEL.QUALITY_HIDDEN,
+                prior=cfg.MODEL.QUALITY_PRIOR,
+                min_score=cfg.MODEL.QUALITY_MIN_SCORE,
+            )
         if self.use_ocfr:
             self.memory_cls = OCFR(dim=self.BACKBONE.token_dim, num_class=num_classes, momentum=0.8)
-
-        # High-Order Structure Learning (shared across three modalities)
-        if self.use_hsl:
-            feat_h = int(cfg.INPUT.SIZE_TRAIN[0] // cfg.MODEL.STRIDE_SIZE[0])
-            feat_w = int(cfg.INPUT.SIZE_TRAIN[1] // cfg.MODEL.STRIDE_SIZE[1])
-            self.HSL = HSLModule(in_features=self.BACKBONE.token_dim,
-                                 edges=cfg.MODEL.HSL_EDGES,
-                                 filters=cfg.MODEL.HSL_FILTERS,
-                                 feat_h=feat_h, feat_w=feat_w,
-                                 group_size=cfg.MODEL.HSL_GROUP_SIZE,
-                                 graphw=cfg.MODEL.HSL_GRAPHW,
-                                 theta1=cfg.MODEL.HSL_THETA1)
 
         # The output learning params of fused features
         self.FUSE_HEAD = nn.Linear(3 * self.BACKBONE.token_dim, num_classes, bias=False)
@@ -166,6 +231,106 @@ class HTLReID(nn.Module):
             self.AL_BN = nn.BatchNorm1d(3 * self.BACKBONE.token_dim)
             self.AL_HEAD.apply(weights_init_classifier)
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        if self.use_part:
+            part_dim = 3 * self.part_num * self.BACKBONE.token_dim
+            self.PART_BN = nn.BatchNorm1d(part_dim)
+            self.PART_HEAD = nn.Linear(part_dim, num_classes, bias=False)
+            self.PART_HEAD.apply(weights_init_classifier)
+
+    @staticmethod
+    def _concat_cls(rgb_feat, nir_feat, tir_feat, quality_scores=None):
+        cls_list = [rgb_feat[:, 0, :], nir_feat[:, 0, :], tir_feat[:, 0, :]]
+        if quality_scores is not None:
+            cls_list = [
+                cls_list[i] * quality_scores[:, i:i + 1]
+                for i in range(3)
+            ]
+        return torch.cat(cls_list, dim=-1)
+
+    def _apply_modality_dropout(self, rgb, nir, tir=None):
+        if (not self.training) or self.modality_drop_prob <= 0:
+            return rgb, nir, tir
+        modalities = 2 if tir is None else 3
+        keep = torch.rand(rgb.size(0), modalities, device=rgb.device) > self.modality_drop_prob
+        empty = ~keep.any(dim=1)
+        if empty.any():
+            keep[empty, 1 if modalities > 1 else 0] = True
+        rgb = rgb * keep[:, 0].view(-1, 1, 1, 1).to(rgb.dtype)
+        nir = nir * keep[:, 1].view(-1, 1, 1, 1).to(nir.dtype)
+        if tir is not None:
+            tir = tir * keep[:, 2].view(-1, 1, 1, 1).to(tir.dtype)
+        return rgb, nir, tir
+
+    def _adapt_features(self, rgb_feat, nir_feat, tir_feat=None):
+        if not self.use_adapter:
+            return rgb_feat, nir_feat, tir_feat
+        rgb_feat = self.MODALITY_ADAPTERS['RGB'](rgb_feat)
+        nir_feat = self.MODALITY_ADAPTERS['NIR'](nir_feat)
+        if tir_feat is not None:
+            tir_feat = self.MODALITY_ADAPTERS['TIR'](tir_feat)
+        return rgb_feat, nir_feat, tir_feat
+
+    def _part_feature(self, rgb_feat, nir_feat, tir_feat, quality_scores=None):
+        def modal_parts(feat, quality=None):
+            B, _, C = feat.shape
+            patches = feat[:, 1:, :].view(B, self.feat_h, self.feat_w, C)
+            pooled = []
+            for chunk in torch.chunk(patches, self.part_num, dim=1):
+                pooled.append(chunk.mean(dim=(1, 2)))
+            out = torch.cat(pooled, dim=-1)
+            if quality is not None:
+                out = out * quality.view(B, 1)
+            return out
+
+        qualities = [None, None, None]
+        if quality_scores is not None:
+            qualities = [quality_scores[:, i] for i in range(3)]
+        return torch.cat([
+            modal_parts(rgb_feat, qualities[0]),
+            modal_parts(nir_feat, qualities[1]),
+            modal_parts(tir_feat, qualities[2]),
+        ], dim=-1)
+
+    def _auxiliary_losses(self, rgb_feat, nir_feat, tir_feat, masks, quality_scores, has_tir=True):
+        loss = torch.zeros((), device=rgb_feat.device)
+        cls_list = [rgb_feat[:, 0, :], nir_feat[:, 0, :], tir_feat[:, 0, :]]
+        if quality_scores is None:
+            quality_scores = torch.ones(rgb_feat.size(0), 3, device=rgb_feat.device, dtype=rgb_feat.dtype)
+            if not has_tir:
+                quality_scores[:, 2] = 0.0
+
+        valid_pairs = [(0, 1)]
+        if has_tir:
+            valid_pairs += [(0, 2), (1, 2)]
+
+        if self.align_loss_weight > 0:
+            align = torch.zeros_like(loss)
+            norm_cls = [F.normalize(c, dim=-1) for c in cls_list]
+            for i, j in valid_pairs:
+                weight = quality_scores[:, i] * quality_scores[:, j]
+                align = align + (weight * (1.0 - (norm_cls[i] * norm_cls[j]).sum(dim=-1))).mean()
+            loss = loss + self.align_loss_weight * align / max(len(valid_pairs), 1)
+
+        if self.token_consistency_weight > 0 and masks is not None:
+            token_loss = torch.zeros_like(loss)
+            for i, j in valid_pairs:
+                mi = masks[i].float()
+                mj = masks[j].float()
+                inter = (mi * mj).sum(dim=1)
+                union = ((mi + mj) > 0).float().sum(dim=1).clamp_min(1.0)
+                weight = quality_scores[:, i] * quality_scores[:, j]
+                token_loss = token_loss + (weight * (1.0 - inter / union)).mean()
+            loss = loss + self.token_consistency_weight * token_loss / max(len(valid_pairs), 1)
+
+        if self.gate_balance_weight > 0:
+            active = torch.tensor([1.0, 1.0, 1.0 if has_tir else 0.0],
+                                  device=rgb_feat.device, dtype=quality_scores.dtype).view(1, 3)
+            q = quality_scores * active
+            q_norm = q / (q.sum(dim=1, keepdim=True) + 1e-6)
+            target = active / active.sum(dim=1, keepdim=True).clamp_min(1.0)
+            loss = loss + self.gate_balance_weight * ((q_norm - target) ** 2).sum(dim=1).mean()
+
+        return loss
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path, map_location='cpu')
@@ -197,21 +362,19 @@ class HTLReID(nn.Module):
             RGB = x['RGB']
             NIR = x['NI']
             TIR = x['TI']
+            RGB, NIR, TIR = self._apply_modality_dropout(RGB, NIR, TIR)
             mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=TIR, img_path=img_path, mode=mode, writer=writer,
                                        step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             TIR_feat, TIR_attn = self.BACKBONE(TIR, cam_label=cam_label, view_label=view_label)
-
-            # HSL: enhance patch tokens with high-order structure learning
-            if self.use_hsl:
-                RGB_feat = torch.cat([RGB_feat[:, :1, :], self.HSL(RGB_feat[:, 1:, :])], dim=1)
-                NIR_feat = torch.cat([NIR_feat[:, :1, :], self.HSL(NIR_feat[:, 1:, :])], dim=1)
-                TIR_feat = torch.cat([TIR_feat[:, :1, :], self.HSL(TIR_feat[:, 1:, :])], dim=1)
+            RGB_feat, NIR_feat, TIR_feat = self._adapt_features(RGB_feat, NIR_feat, TIR_feat)
 
             RGB_cls4tri = RGB_feat[:, 0, :]
             NIR_cls4tri = NIR_feat[:, 0, :]
             TIR_cls4tri = TIR_feat[:, 0, :]
+            quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, TIR_cls4tri) \
+                if self.use_quality else None
             if self.AL:
                 ori = torch.cat([RGB_cls4tri, NIR_cls4tri, TIR_cls4tri], dim=-1)
                 ori_score = self.AL_HEAD(self.AL_BN(ori))
@@ -228,12 +391,13 @@ class HTLReID(nn.Module):
                                                                      TIR_attn=TIR_attn,
                                                                      img_path=img_path,
                                                                      epoch=epoch, writer=writer,
-                                                                     mask_fre=mask_fre)
+                                                                     mask_fre=mask_fre,
+                                                                     quality_scores=quality_scores)
 
             if self.use_agf:
-                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s)
+                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores=quality_scores)
             else:
-                cls4t = torch.cat([RGB_feat_s[:, 0, :], NIR_feat_s[:, 0, :], TIR_feat_s[:, 0, :]], dim=-1)
+                cls4t = self._concat_cls(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores)
             if self.use_ocfr:
                 RGB_cls = RGB_feat_s[:, 0, :]
                 NIR_cls = NIR_feat_s[:, 0, :]
@@ -241,10 +405,19 @@ class HTLReID(nn.Module):
                 loss_aux = self.memory_cls(RGB_cls, NIR_cls, TIR_cls, label, epoch=epoch)
             else:
                 loss_aux = torch.zeros((), device=RGB_feat.device)
+            loss_aux = loss_aux + self._auxiliary_losses(
+                RGB_feat_s, NIR_feat_s, TIR_feat_s, mask, quality_scores, has_tir=True)
             score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
+            if self.use_part:
+                part_feat = self._part_feature(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores)
+                part_score = self.PART_HEAD(self.PART_BN(part_feat))
             if self.AL:
+                if self.use_part:
+                    return score, cls4t, ori_score, ori, part_score, part_feat, loss_aux
                 return score, cls4t, ori_score, ori, loss_aux
             else:
+                if self.use_part:
+                    return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, TIR_cls_score, TIR_cls4tri, part_score, part_feat, loss_aux
                 return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, TIR_cls_score, TIR_cls4tri, loss_aux
         else:
             RGB = x['RGB']
@@ -255,12 +428,9 @@ class HTLReID(nn.Module):
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             TIR_feat, TIR_attn = self.BACKBONE(TIR, cam_label=cam_label, view_label=view_label)
-
-            # HSL: enhance patch tokens with high-order structure learning
-            if self.use_hsl:
-                RGB_feat = torch.cat([RGB_feat[:, :1, :], self.HSL(RGB_feat[:, 1:, :])], dim=1)
-                NIR_feat = torch.cat([NIR_feat[:, :1, :], self.HSL(NIR_feat[:, 1:, :])], dim=1)
-                TIR_feat = torch.cat([TIR_feat[:, :1, :], self.HSL(TIR_feat[:, 1:, :])], dim=1)
+            RGB_feat, NIR_feat, TIR_feat = self._adapt_features(RGB_feat, NIR_feat, TIR_feat)
+            quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], TIR_feat[:, 0, :]) \
+                if self.use_quality else None
 
             RGB_feat_s, NIR_feat_s, TIR_feat_s, mask = self.HS_FACSS(RGB_feat=RGB_feat,
                                                                      RGB_attn=RGB_attn,
@@ -270,12 +440,13 @@ class HTLReID(nn.Module):
                                                                      TIR_attn=TIR_attn,
                                                                      img_path=img_path,
                                                                      epoch=epoch, writer=writer,
-                                                                     mask_fre=mask_fre)
+                                                                     mask_fre=mask_fre,
+                                                                     quality_scores=quality_scores)
 
             if self.use_agf:
-                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s)
+                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores=quality_scores)
             else:
-                cls4t = torch.cat([RGB_feat_s[:, 0, :], NIR_feat_s[:, 0, :], TIR_feat_s[:, 0, :]], dim=-1)
+                cls4t = self._concat_cls(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores)
             return cls4t
 
     def forward_two_modalities(self, x, cam_label=None, label=None, view_label=None, cross_type=None, img_path=None,
@@ -285,18 +456,17 @@ class HTLReID(nn.Module):
         if self.training:
             RGB = x['RGB']
             NIR = x['NI']
+            RGB, NIR, _ = self._apply_modality_dropout(RGB, NIR, None)
             mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=None, img_path=img_path, mode=mode, writer=writer,
                                        step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
-
-            # HSL: enhance patch tokens with high-order structure learning
-            if self.use_hsl:
-                RGB_feat = torch.cat([RGB_feat[:, :1, :], self.HSL(RGB_feat[:, 1:, :])], dim=1)
-                NIR_feat = torch.cat([NIR_feat[:, :1, :], self.HSL(NIR_feat[:, 1:, :])], dim=1)
+            RGB_feat, NIR_feat, _ = self._adapt_features(RGB_feat, NIR_feat, None)
 
             RGB_cls4tri = RGB_feat[:, 0, :]
             NIR_cls4tri = NIR_feat[:, 0, :]
+            quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, None) \
+                if self.use_quality else None
             # Here, you need to change the head for the AL setting to 2*token_dim
             if self.AL:
                 ori = torch.cat([RGB_cls4tri, NIR_cls4tri], dim=-1)
@@ -313,13 +483,14 @@ class HTLReID(nn.Module):
                                                          TIR_attn=None,
                                                          img_path=img_path,
                                                          epoch=epoch, writer=writer,
-                                                         mask_fre=mask_fre)
+                                                         mask_fre=mask_fre,
+                                                         quality_scores=quality_scores)
 
             TIR_feat_s = torch.zeros_like(RGB_feat_s)
             if self.use_agf:
-                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s)
+                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores=quality_scores)
             else:
-                cls4t = torch.cat([RGB_feat_s[:, 0, :], NIR_feat_s[:, 0, :], TIR_feat_s[:, 0, :]], dim=-1)
+                cls4t = self._concat_cls(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores)
             if self.use_ocfr:
                 RGB_cls = RGB_feat_s[:, 0, :]
                 NIR_cls = NIR_feat_s[:, 0, :]
@@ -327,10 +498,19 @@ class HTLReID(nn.Module):
                 loss_aux = self.memory_cls(RGB_cls, NIR_cls, TIR_cls, label, epoch=epoch)
             else:
                 loss_aux = torch.zeros((), device=RGB_feat.device)
+            loss_aux = loss_aux + self._auxiliary_losses(
+                RGB_feat_s, NIR_feat_s, TIR_feat_s, mask, quality_scores, has_tir=False)
             score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
+            if self.use_part:
+                part_feat = self._part_feature(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores)
+                part_score = self.PART_HEAD(self.PART_BN(part_feat))
             if self.AL:
+                if self.use_part:
+                    return score, cls4t, ori_score, ori, part_score, part_feat, loss_aux
                 return score, cls4t, ori_score, ori, loss_aux
             else:
+                if self.use_part:
+                    return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, part_score, part_feat, loss_aux
                 return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, loss_aux
 
         else:
@@ -340,11 +520,9 @@ class HTLReID(nn.Module):
                                        step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
-
-            # HSL: enhance patch tokens with high-order structure learning
-            if self.use_hsl:
-                RGB_feat = torch.cat([RGB_feat[:, :1, :], self.HSL(RGB_feat[:, 1:, :])], dim=1)
-                NIR_feat = torch.cat([NIR_feat[:, :1, :], self.HSL(NIR_feat[:, 1:, :])], dim=1)
+            RGB_feat, NIR_feat, _ = self._adapt_features(RGB_feat, NIR_feat, None)
+            quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], None) \
+                if self.use_quality else None
 
             RGB_feat_s, NIR_feat_s, mask = self.HS_FACSS(RGB_feat=RGB_feat,
                                                          RGB_attn=RGB_attn,
@@ -354,13 +532,14 @@ class HTLReID(nn.Module):
                                                          TIR_attn=None,
                                                          img_path=img_path,
                                                          epoch=epoch, writer=writer,
-                                                         mask_fre=mask_fre)
+                                                         mask_fre=mask_fre,
+                                                         quality_scores=quality_scores)
 
             TIR_feat_s = torch.zeros_like(RGB_feat_s)
             if self.use_agf:
-                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s)
+                cls4t = self.AGF(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores=quality_scores)
             else:
-                cls4t = torch.cat([RGB_feat_s[:, 0, :], NIR_feat_s[:, 0, :], TIR_feat_s[:, 0, :]], dim=-1)
+                cls4t = self._concat_cls(RGB_feat_s, NIR_feat_s, TIR_feat_s, quality_scores)
             return cls4t
 
 

@@ -46,6 +46,11 @@ _C.MODEL.HS_LAYERS = [4, 8, 12]
 _C.MODEL.HS_K = 16
 # FACSS (Fusion-Aware Synergistic Selection)
 _C.MODEL.FACSS_K = 16
+_C.MODEL.FACSS_DYNAMIC_K = 1
+_C.MODEL.FACSS_MIN_K = 8
+_C.MODEL.FACSS_MAX_K = 32
+_C.MODEL.FACSS_K_HIDDEN = 192
+_C.MODEL.FACSS_SOFT_RESIDUAL_WEIGHT = 0.15
 _C.MODEL.FACSS_ALPHA_HIDDEN = 192
 # Pooling for cross-modal cosine: 'max' (paper) | 'topk' | 'lse'
 _C.MODEL.FACSS_CROSS_POOL = 'max'
@@ -65,13 +70,23 @@ _C.MODEL.OCFR = 0
 _C.MODEL.AGF = 1
 # AGF (Adaptive Gated Fusion) hyperparameters
 _C.MODEL.AGF_NUM_HEADS = 12
-_C.MODEL.HSL = 1
-# HSL (High-Order Structure Learning) hyperparameters
-_C.MODEL.HSL_EDGES = 128
-_C.MODEL.HSL_FILTERS = 128
-_C.MODEL.HSL_GROUP_SIZE = 1
-_C.MODEL.HSL_GRAPHW = 1.0
-_C.MODEL.HSL_THETA1 = 0.5
+# Nighttime modality reliability. The prior only initializes the quality head:
+# RGB is kept useful but starts slightly below NIR/TIR for night imagery.
+_C.MODEL.QUALITY_AWARE = 1
+_C.MODEL.QUALITY_HIDDEN = 192
+_C.MODEL.QUALITY_PRIOR = [0.50, 0.65, 0.65]
+_C.MODEL.QUALITY_MIN_SCORE = 0.05
+# Lightweight modality adapters after the shared ViT backbone.
+_C.MODEL.MODALITY_ADAPTER = 1
+_C.MODEL.MODALITY_ADAPTER_DIM = 192
+_C.MODEL.MODALITY_ADAPTER_SCALE = 0.5
+# Local identity evidence from selected tokens.
+_C.MODEL.PART_BRANCH = 1
+_C.MODEL.PART_NUM = 3
+# Auxiliary cross-modal constraints.
+_C.MODEL.ALIGN_LOSS_WEIGHT = 0.2
+_C.MODEL.TOKEN_CONSISTENCY_WEIGHT = 0.05
+_C.MODEL.GATE_BALANCE_WEIGHT = 0.01
 
 # Transformer setting
 _C.MODEL.DROP_PATH = 0.1
@@ -103,6 +118,8 @@ _C.INPUT.PIXEL_MEAN = [0.5, 0.5, 0.5]
 _C.INPUT.PIXEL_STD = [0.5, 0.5, 0.5]
 # Value of padding size
 _C.INPUT.PADDING = 10
+_C.INPUT.GRAY_REPLACE_PROB = 0.3
+_C.INPUT.MODALITY_DROP_PROB = 0.1
 
 # -----------------------------------------------------------------------------
 # Dataset
@@ -128,11 +145,13 @@ _C.DATALOADER.NUM_INSTANCE = 16
 # ---------------------------------------------------------------------------- #
 _C.SOLVER = CN()
 # Name of optimizer
-_C.SOLVER.OPTIMIZER_NAME = "SGD"
+_C.SOLVER.OPTIMIZER_NAME = "AdamW"
 # Number of max epoches
-_C.SOLVER.MAX_EPOCHS = 70
+_C.SOLVER.MAX_EPOCHS = 120
 # Base learning rate
-_C.SOLVER.BASE_LR = 0.001
+_C.SOLVER.BASE_LR = 0.0001
+_C.SOLVER.BACKBONE_LR_FACTOR = 0.1
+_C.SOLVER.NEW_MODULE_LR_FACTOR = 1.0
 # Factor of learning bias
 _C.SOLVER.LARGE_FC_LR = False
 _C.SOLVER.BIAS_LR_FACTOR = 2
@@ -153,14 +172,14 @@ _C.SOLVER.RANGE_ALPHA = 0
 _C.SOLVER.RANGE_BETA = 1
 _C.SOLVER.RANGE_LOSS_WEIGHT = 1
 # Settings of weight decay
-_C.SOLVER.WEIGHT_DECAY = 0.0001
-_C.SOLVER.WEIGHT_DECAY_BIAS = 0.0001
+_C.SOLVER.WEIGHT_DECAY = 0.05
+_C.SOLVER.WEIGHT_DECAY_BIAS = 0.0
 # decay rate of learning rate
 _C.SOLVER.GAMMA = 0.1
 # warm up factor
 _C.SOLVER.WARMUP_FACTOR = 0.01
 # iterations of warm up
-_C.SOLVER.WARMUP_ITERS = 10
+_C.SOLVER.WARMUP_ITERS = 20
 # method of warm up, option: 'constant','linear'
 _C.SOLVER.WARMUP_METHOD = "linear"
 
@@ -191,7 +210,7 @@ _C.TEST = CN()
 # Number of images per batch during test
 _C.TEST.IMS_PER_BATCH = 64
 # If test with re-ranking, options: 'yes','no'
-_C.TEST.RE_RANKING = 'no'
+_C.TEST.RE_RANKING = 'yes'
 # Path to trained model
 _C.TEST.WEIGHT = ""
 # Which feature of BNNeck to be used for test, before or after BNNneck, options: 'before' or 'after'

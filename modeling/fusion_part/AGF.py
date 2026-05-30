@@ -76,57 +76,34 @@ class GatedCrossAttn(nn.Module):
         return x
 
 
-class AGFBlock(nn.Module):
-    """
-    One rotation block. mode=0: each modality's cls token attends to a
-    neighbor's patches (cross-modal exchange). mode=1: each modality's cls
-    attends to its own patches (self-aggregation), and the three cls tokens
-    are concatenated to form the fused representation.
-
-    All three calls within a block share a single GatedCrossAttn — the paper
-    does not require modality-specific gating, and sharing keeps the
-    parameter count aligned with the previous TPM design.
-    """
-
-    def __init__(self, dim, num_heads, mode=0):
-        super().__init__()
-        self.gca = GatedCrossAttn(dim, num_heads, mlp_ratio=4., qkv_bias=False,
-                                  qk_scale=None, drop=0., attn_drop=0.,
-                                  drop_path=0., act_layer=nn.GELU,
-                                  norm_layer=nn.LayerNorm)
-        self.mode = mode
-
-    def forward(self, x, y, z):
-        if self.mode == 0:
-            x_cls = self.gca(x[:, 0, :], y[:, 1:, :])
-            y_cls = self.gca(y[:, 0, :], z[:, 1:, :])
-            z_cls = self.gca(z[:, 0, :], x[:, 1:, :])
-            x = torch.cat([x_cls.unsqueeze(1), x[:, 1:, :]], dim=-2)
-            y = torch.cat([y_cls.unsqueeze(1), y[:, 1:, :]], dim=-2)
-            z = torch.cat([z_cls.unsqueeze(1), z[:, 1:, :]], dim=-2)
-            return x, y, z
-        else:
-            x_cls = self.gca(x[:, 0, :], x[:, 1:, :])
-            y_cls = self.gca(y[:, 0, :], y[:, 1:, :])
-            z_cls = self.gca(z[:, 0, :], z[:, 1:, :])
-            cls = torch.cat([x_cls, y_cls, z_cls], dim=-1)
-            return cls
-
-
 class AGF(nn.Module):
     """
-    Adaptive Gated Fusion (AGF). Three rotation blocks with independent
-    weights stage cross-modal exchange, followed by a self-aggregation that
-    yields the final fused [B, 3D] cls representation. Replaces TPM; the
-    only architectural difference is the gated convex-combination residual
-    inside each cross-attn (HTL paper §3.4).
+    Quality-aware graph fusion for nighttime RGB/NIR/TIR ReID.
+
+    Each modality is a graph node. For every target node, a shared gated
+    cross-attention reads both other modalities, while a small edge gate and
+    the per-modality quality scores determine which neighbor should dominate.
+    The final [B, 3D] descriptor preserves the original AGF output contract.
     """
 
     def __init__(self, dim, num_heads):
         super().__init__()
-        self.start = AGFBlock(dim, num_heads)
-        self.middle = AGFBlock(dim, num_heads)
-        self.end = AGFBlock(dim, num_heads, mode=1)
+        self.cross = GatedCrossAttn(dim, num_heads, mlp_ratio=4., qkv_bias=False,
+                                    qk_scale=None, drop=0., attn_drop=0.,
+                                    drop_path=0., act_layer=nn.GELU,
+                                    norm_layer=nn.LayerNorm)
+        self.self_aggr = GatedCrossAttn(dim, num_heads, mlp_ratio=4., qkv_bias=False,
+                                        qk_scale=None, drop=0., attn_drop=0.,
+                                        drop_path=0., act_layer=nn.GELU,
+                                        norm_layer=nn.LayerNorm)
+        hidden = max(dim // 4, 64)
+        self.edge_gate = nn.Sequential(
+            nn.LayerNorm(2 * dim + 2),
+            nn.Linear(2 * dim + 2, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+        nn.init.zeros_(self.edge_gate[-1].bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -137,8 +114,67 @@ class AGF(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x, y, z):
-        x, y, z = self.start(x=x, y=y, z=z)
-        x, z, y = self.middle(x=x, y=z, z=y)
-        cls = self.end(x=x, y=y, z=z)
-        return cls
+    @staticmethod
+    def _quality_tensor(x, quality_scores):
+        if quality_scores is None:
+            return torch.ones(x.size(0), 3, device=x.device, dtype=x.dtype)
+        return quality_scores.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
+
+    def _edge_weights(self, cls_tokens, quality, target_idx):
+        src_indices = [i for i in range(3) if i != target_idx]
+        target = cls_tokens[target_idx]
+        q_t = quality[:, target_idx:target_idx + 1]
+        logits = []
+        valid = []
+        for src_idx in src_indices:
+            source = cls_tokens[src_idx]
+            q_s = quality[:, src_idx:src_idx + 1]
+            edge_in = torch.cat([target, source, q_t, q_s], dim=-1)
+            logit = self.edge_gate(edge_in).squeeze(-1)
+            logit = logit + torch.log(q_s.squeeze(-1).clamp_min(1e-6))
+            logits.append(logit)
+            valid.append(q_s.squeeze(-1) > 0)
+
+        logits = torch.stack(logits, dim=1)
+        valid = torch.stack(valid, dim=1)
+        very_neg = torch.finfo(logits.dtype).min
+        logits = torch.where(valid, logits, torch.full_like(logits, very_neg))
+        all_invalid = ~valid.any(dim=1, keepdim=True)
+        logits = torch.where(all_invalid, torch.zeros_like(logits), logits)
+        weights = torch.softmax(logits, dim=1) * valid.to(logits.dtype)
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-6)
+        return src_indices, weights
+
+    def _fuse_node(self, feats, cls_tokens, quality, target_idx):
+        target_feat = feats[target_idx]
+        target_cls = cls_tokens[target_idx]
+        self_cls = self.self_aggr(target_cls, target_feat[:, 1:, :])
+        src_indices, weights = self._edge_weights(cls_tokens, quality, target_idx)
+
+        cross_cls = torch.zeros_like(self_cls)
+        other_quality = torch.zeros_like(quality[:, target_idx])
+        valid_count = torch.zeros_like(quality[:, target_idx])
+        for pos, src_idx in enumerate(src_indices):
+            src_feat = feats[src_idx]
+            candidate = self.cross(target_cls, src_feat[:, 1:, :])
+            w = weights[:, pos:pos + 1]
+            cross_cls = cross_cls + w * candidate
+            is_valid = (quality[:, src_idx] > 0).to(quality.dtype)
+            other_quality = other_quality + quality[:, src_idx] * is_valid
+            valid_count = valid_count + is_valid
+
+        other_quality = other_quality / valid_count.clamp_min(1.0)
+        q_t = quality[:, target_idx]
+        cross_mix = other_quality / (q_t + other_quality + 1e-6)
+        fused = (1.0 - cross_mix.unsqueeze(-1)) * self_cls + cross_mix.unsqueeze(-1) * cross_cls
+        return fused * (q_t > 0).to(fused.dtype).unsqueeze(-1)
+
+    def forward(self, x, y, z, quality_scores=None):
+        feats = [x, y, z]
+        cls_tokens = [feat[:, 0, :] for feat in feats]
+        quality = self._quality_tensor(x, quality_scores)
+        fused = [
+            self._fuse_node(feats, cls_tokens, quality, target_idx=i)
+            for i in range(3)
+        ]
+        return torch.cat(fused, dim=-1)
