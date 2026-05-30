@@ -10,7 +10,8 @@ _C.MODEL.DEVICE = "cuda"
 # ID number of GPU
 _C.MODEL.DEVICE_ID = '0'
 # Name of model
-_C.MODEL.NAME = 'HTL-ReID'
+_C.MODEL.NAME = 'CASS-Net'
+_C.MODEL.METHOD = 'CASS'
 # Margin of triplet loss
 _C.MODEL.MARGIN = 0
 # Path to pretrained model of backbone
@@ -67,26 +68,45 @@ _C.MODEL.FACSS_STE_TAU = 1.0
 # OCFR auxiliary loss (not in paper); off by default for paper-faithful reproduction
 _C.MODEL.OCFR = 0
 # Ablation switches (1=enable, 0=disable)
-_C.MODEL.AGF = 1
+_C.MODEL.AGF = 0
 # AGF (Adaptive Gated Fusion) hyperparameters
 _C.MODEL.AGF_NUM_HEADS = 12
 # Nighttime modality reliability. The prior only initializes the quality head:
 # RGB is kept useful but starts slightly below NIR/TIR for night imagery.
-_C.MODEL.QUALITY_AWARE = 1
+_C.MODEL.QUALITY_AWARE = 0
 _C.MODEL.QUALITY_HIDDEN = 192
 _C.MODEL.QUALITY_PRIOR = [0.50, 0.65, 0.65]
 _C.MODEL.QUALITY_MIN_SCORE = 0.05
 # Lightweight modality adapters after the shared ViT backbone.
-_C.MODEL.MODALITY_ADAPTER = 1
+_C.MODEL.MODALITY_ADAPTER = 0
 _C.MODEL.MODALITY_ADAPTER_DIM = 192
 _C.MODEL.MODALITY_ADAPTER_SCALE = 0.5
 # Local identity evidence from selected tokens.
-_C.MODEL.PART_BRANCH = 1
+_C.MODEL.PART_BRANCH = 0
 _C.MODEL.PART_NUM = 3
 # Auxiliary cross-modal constraints.
-_C.MODEL.ALIGN_LOSS_WEIGHT = 0.2
-_C.MODEL.TOKEN_CONSISTENCY_WEIGHT = 0.05
-_C.MODEL.GATE_BALANCE_WEIGHT = 0.01
+_C.MODEL.ALIGN_LOSS_WEIGHT = 0.0
+_C.MODEL.TOKEN_CONSISTENCY_WEIGHT = 0.0
+_C.MODEL.GATE_BALANCE_WEIGHT = 0.0
+
+# CASS-Net (chapter 4): HSS + SQT + NGA + CA-GF
+_C.MODEL.CASS_NUM_HEADS = 12
+_C.MODEL.CASS_TOPK = 64
+_C.MODEL.CASS_STE = 1
+_C.MODEL.CASS_STE_TAU = 1.0
+_C.MODEL.CASS_HSS_EDGES = 256
+_C.MODEL.CASS_HSS_FILTERS = 128
+_C.MODEL.CASS_HSS_GRAPH_WEIGHT = 1.0
+_C.MODEL.CASS_HSS_THETA = 0.0
+_C.MODEL.CASS_HSS_WHITEN = 1
+_C.MODEL.CASS_WHITEN_GROUP_SIZE = 16
+_C.MODEL.CASS_WHITEN_MOMENTUM = 0.1
+_C.MODEL.CASS_WHITEN_EPS = 1e-3
+_C.MODEL.CASS_NGA_MEMORY = 1
+_C.MODEL.CASS_NGA_KNN = 20
+_C.MODEL.CASS_NGA_HIDDEN = 32
+_C.MODEL.CASS_NGA_GATE_GROUPS = 16
+_C.MODEL.CASS_NGA_GATE_SCALE = 0.1
 
 # Transformer setting
 _C.MODEL.DROP_PATH = 0.1
@@ -221,4 +241,4 @@ _C.TEST.FEAT_NORM = 'yes'
 # Misc options
 # ---------------------------------------------------------------------------- #
 # Path to checkpoint and saved log of trained model
-_C.OUTPUT_DIR = "./outputs/HTL-ReID"
+_C.OUTPUT_DIR = "./outputs/CASS-Net"

@@ -24,6 +24,7 @@ def do_train(cfg,
              model,
              center_criterion,
              train_loader,
+             train_loader_normal,
              val_loader,
              optimizer,
              optimizer_center,
@@ -66,6 +67,9 @@ def do_train(cfg,
         evaluator_m.reset()
         acc_meter.reset()
         scheduler.step(epoch)
+        model_for_memory = model.module if hasattr(model, 'module') else model
+        if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS':
+            model_for_memory.refresh_nga_memory(train_loader_normal, device=device, logger=logger)
         model.train()
         for n_iter, (img, vid, target_cam, target_view, imgpath) in enumerate(train_loader):
             optimizer.zero_grad()

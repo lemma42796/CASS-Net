@@ -49,6 +49,10 @@ def _make_cfg(yml=None, **overrides):
     c.MODEL.SIE_CAMERA = False              # avoid camera_num plumbing in tests
     c.INPUT.SIZE_TRAIN = [128, 64]           # keep CPU smoke tests quick
     c.INPUT.SIZE_TEST = [128, 64]
+    c.MODEL.CASS_HSS_EDGES = 16
+    c.MODEL.CASS_HSS_FILTERS = 32
+    c.MODEL.CASS_TOPK = 8
+    c.MODEL.CASS_NGA_MEMORY = 0
     for k, v in overrides.items():
         # supports dotted MODEL.XYZ overrides
         node = c
@@ -57,6 +61,16 @@ def _make_cfg(yml=None, **overrides):
             node = getattr(node, p)
         setattr(node, parts[-1], v)
     return c
+
+
+def _expected_train_outputs(cfg, modalities=3):
+    if cfg.MODEL.AL:
+        base = 5
+    else:
+        base = 2 + 2 * modalities + 1
+    if cfg.MODEL.METHOD.upper() != 'CASS' and cfg.MODEL.PART_BRANCH:
+        base += 2
+    return base
 
 
 def _dummy_batch(cfg, modalities=('RGB', 'NI', 'TI')):
@@ -111,10 +125,7 @@ def test_three_modal_pipeline(yml):
     output = model(x, cam_label=None, label=label, epoch=0)
     assert isinstance(output, tuple), 'expected tuple, got {}'.format(type(output))
 
-    # AL=1: (score, cls4t, ori_score, ori, part_score, part_feat, loss_aux) = 7
-    # AL=0: (score, cls4t, RGB_s, RGB_f, NIR_s, NIR_f, TIR_s, TIR_f,
-    #        part_score, part_feat, loss_aux) = 11
-    expected_len = 7 if cfg.MODEL.AL else 11
+    expected_len = _expected_train_outputs(cfg, modalities=3)
     assert len(output) == expected_len, 'expected {} outputs, got {}'.format(
         expected_len, len(output))
 
@@ -166,9 +177,8 @@ def test_two_modal_pipeline():
     label = torch.randint(0, NUM_CLASSES, (BATCH,))
     output = model.forward_two_modalities(x, cam_label=None, label=label, epoch=0)
 
-    # AL=0 2-modal: (score, cls4t, RGB_s, RGB_f, NIR_s, NIR_f,
-    #                 part_score, part_feat, loss_aux) = 9
-    assert len(output) == 9, 'expected 9 outputs, got {}'.format(len(output))
+    expected_len = _expected_train_outputs(cfg, modalities=2)
+    assert len(output) == expected_len, 'expected {} outputs, got {}'.format(expected_len, len(output))
     score, cls4t = output[0], output[1]
     assert score.shape == (BATCH, NUM_CLASSES)
     assert cls4t.shape == (BATCH, 3 * model.BACKBONE.token_dim)

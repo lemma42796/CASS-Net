@@ -81,6 +81,7 @@ if __name__ == '__main__':
         model,
         center_criterion,
         train_loader,
+        train_loader_normal,
         val_loader,
         optimizer,
         optimizer_center,

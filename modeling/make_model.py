@@ -8,6 +8,7 @@ from modeling.fusion_part.Frequency import Frequency_based_Token_Selection
 from modeling.fusion_part.OCFR import OCFR
 from modeling.fusion_part.HS_FACSS import HSFACSS
 from modeling.fusion_part.AGF import AGF
+from modeling.fusion_part.CASS import CASSModule
 
 
 def weights_init_kaiming(m):
@@ -163,19 +164,26 @@ class HTLReID(nn.Module):
         self.feat_h = int(cfg.INPUT.SIZE_TRAIN[0] // cfg.MODEL.STRIDE_SIZE[0])
         self.feat_w = int(cfg.INPUT.SIZE_TRAIN[1] // cfg.MODEL.STRIDE_SIZE[1])
         self.num_patches = self.feat_h * self.feat_w
-        self.HS_FACSS = HSFACSS(dim=self.BACKBONE.token_dim, cfg=cfg)
-        self.FREQ_INDEX = Frequency_based_Token_Selection(keep=cfg.MODEL.FREQUENCY_KEEP,
-                                                          stride=cfg.MODEL.STRIDE_SIZE[0])
-        self.use_agf = cfg.MODEL.AGF
-        self.use_ocfr = bool(cfg.MODEL.OCFR)
-        self.use_quality = bool(cfg.MODEL.QUALITY_AWARE)
-        self.use_adapter = bool(cfg.MODEL.MODALITY_ADAPTER)
-        self.use_part = bool(cfg.MODEL.PART_BRANCH)
+        self.method = cfg.MODEL.METHOD.upper()
+        self.use_cass = self.method == 'CASS'
+        if self.use_cass:
+            self.CASS = CASSModule(dim=self.BACKBONE.token_dim, cfg=cfg,
+                                   feat_h=self.feat_h, feat_w=self.feat_w)
+        else:
+            self.HS_FACSS = HSFACSS(dim=self.BACKBONE.token_dim, cfg=cfg)
+            self.FREQ_INDEX = Frequency_based_Token_Selection(keep=cfg.MODEL.FREQUENCY_KEEP,
+                                                              stride=cfg.MODEL.STRIDE_SIZE[0])
+        self.use_agf = bool(cfg.MODEL.AGF) and not self.use_cass
+        self.use_ocfr = bool(cfg.MODEL.OCFR) and not self.use_cass
+        self.use_quality = bool(cfg.MODEL.QUALITY_AWARE) and not self.use_cass
+        self.use_adapter = bool(cfg.MODEL.MODALITY_ADAPTER) and not self.use_cass
+        self.use_part = bool(cfg.MODEL.PART_BRANCH) and not self.use_cass
         self.part_num = int(cfg.MODEL.PART_NUM)
-        self.modality_drop_prob = float(cfg.INPUT.MODALITY_DROP_PROB)
+        self.modality_drop_prob = 0.0 if self.use_cass else float(cfg.INPUT.MODALITY_DROP_PROB)
         self.align_loss_weight = float(cfg.MODEL.ALIGN_LOSS_WEIGHT)
         self.token_consistency_weight = float(cfg.MODEL.TOKEN_CONSISTENCY_WEIGHT)
         self.gate_balance_weight = float(cfg.MODEL.GATE_BALANCE_WEIGHT)
+        self.use_cass_memory = self.use_cass and bool(cfg.MODEL.CASS_NGA_MEMORY)
 
         if self.use_agf:
             self.AGF = AGF(dim=self.BACKBONE.token_dim, num_heads=cfg.MODEL.AGF_NUM_HEADS)
@@ -332,6 +340,54 @@ class HTLReID(nn.Module):
 
         return loss
 
+    def _cass_forward_from_features(self, rgb_feat, nir_feat, tir_feat=None, img_path=None):
+        features = {'RGB': rgb_feat, 'NIR': nir_feat}
+        if tir_feat is not None:
+            features['TIR'] = tir_feat
+        selected, masks, fused, cls4t = self.CASS(features, img_path=img_path)
+        rgb_cls = fused['RGB']
+        nir_cls = fused['NIR']
+        tir_cls = fused.get('TIR')
+        if tir_cls is None:
+            tir_cls = torch.zeros_like(rgb_cls)
+        if tir_feat is None:
+            return selected, (masks['RGB'], masks['NIR']), cls4t, rgb_cls, nir_cls, tir_cls
+        return selected, (masks['RGB'], masks['NIR'], masks['TIR']), cls4t, rgb_cls, nir_cls, tir_cls
+
+    def refresh_nga_memory(self, train_loader, device='cuda', logger=None):
+        if (not self.use_cass_memory) or train_loader is None:
+            return
+        was_training = self.training
+        self.eval()
+        memory_chunks = []
+        keys = []
+        with torch.no_grad():
+            for img, _, _, camids, target_view, img_paths in train_loader:
+                img = {
+                    'RGB': img['RGB'].to(device),
+                    'NI': img['NI'].to(device),
+                    'TI': img['TI'].to(device),
+                }
+                camids = camids.to(device)
+                target_view = target_view.to(device)
+                rgb_feat, _ = self.BACKBONE(img['RGB'], cam_label=camids, view_label=target_view)
+                nir_feat, _ = self.BACKBONE(img['NI'], cam_label=camids, view_label=target_view)
+                tir_feat, _ = self.BACKBONE(img['TI'], cam_label=camids, view_label=target_view)
+                cls = torch.stack([
+                    rgb_feat[:, 0, :],
+                    nir_feat[:, 0, :],
+                    tir_feat[:, 0, :],
+                ], dim=1)
+                memory_chunks.append(cls.cpu())
+                keys.extend([str(p) for p in img_paths])
+        if memory_chunks:
+            memory = torch.cat(memory_chunks, dim=0)
+            self.CASS.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'])
+            if logger is not None:
+                logger.info('Refreshed CASS NGA memory: {} samples'.format(memory.size(0)))
+        if was_training:
+            self.train()
+
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path, map_location='cpu')
         model_dict = self.state_dict()
@@ -363,8 +419,10 @@ class HTLReID(nn.Module):
             NIR = x['NI']
             TIR = x['TI']
             RGB, NIR, TIR = self._apply_modality_dropout(RGB, NIR, TIR)
-            mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=TIR, img_path=img_path, mode=mode, writer=writer,
-                                       step=epoch)
+            mask_fre = None
+            if not self.use_cass:
+                mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=TIR, img_path=img_path, mode=mode, writer=writer,
+                                           step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             TIR_feat, TIR_attn = self.BACKBONE(TIR, cam_label=cam_label, view_label=view_label)
@@ -373,6 +431,19 @@ class HTLReID(nn.Module):
             RGB_cls4tri = RGB_feat[:, 0, :]
             NIR_cls4tri = NIR_feat[:, 0, :]
             TIR_cls4tri = TIR_feat[:, 0, :]
+            if self.use_cass:
+                _, _, cls4t, RGB_cls4tri, NIR_cls4tri, TIR_cls4tri = self._cass_forward_from_features(
+                    RGB_feat, NIR_feat, TIR_feat, img_path=img_path)
+                score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
+                loss_aux = torch.zeros((), device=RGB_feat.device)
+                if self.AL:
+                    ori = torch.cat([RGB_cls4tri, NIR_cls4tri, TIR_cls4tri], dim=-1)
+                    ori_score = self.AL_HEAD(self.AL_BN(ori))
+                    return score, cls4t, ori_score, ori, loss_aux
+                RGB_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(RGB_cls4tri))
+                NIR_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(NIR_cls4tri))
+                TIR_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(TIR_cls4tri))
+                return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, TIR_cls_score, TIR_cls4tri, loss_aux
             quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, TIR_cls4tri) \
                 if self.use_quality else None
             if self.AL:
@@ -423,12 +494,18 @@ class HTLReID(nn.Module):
             RGB = x['RGB']
             NIR = x['NI']
             TIR = x['TI']
-            mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=TIR, img_path=img_path, mode=mode, writer=writer,
-                                       step=epoch)
+            mask_fre = None
+            if not self.use_cass:
+                mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=TIR, img_path=img_path, mode=mode, writer=writer,
+                                           step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             TIR_feat, TIR_attn = self.BACKBONE(TIR, cam_label=cam_label, view_label=view_label)
             RGB_feat, NIR_feat, TIR_feat = self._adapt_features(RGB_feat, NIR_feat, TIR_feat)
+            if self.use_cass:
+                _, _, cls4t, _, _, _ = self._cass_forward_from_features(
+                    RGB_feat, NIR_feat, TIR_feat, img_path=img_path)
+                return cls4t
             quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], TIR_feat[:, 0, :]) \
                 if self.use_quality else None
 
@@ -457,14 +534,28 @@ class HTLReID(nn.Module):
             RGB = x['RGB']
             NIR = x['NI']
             RGB, NIR, _ = self._apply_modality_dropout(RGB, NIR, None)
-            mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=None, img_path=img_path, mode=mode, writer=writer,
-                                       step=epoch)
+            mask_fre = None
+            if not self.use_cass:
+                mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=None, img_path=img_path, mode=mode, writer=writer,
+                                           step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             RGB_feat, NIR_feat, _ = self._adapt_features(RGB_feat, NIR_feat, None)
 
             RGB_cls4tri = RGB_feat[:, 0, :]
             NIR_cls4tri = NIR_feat[:, 0, :]
+            if self.use_cass:
+                _, _, cls4t, RGB_cls4tri, NIR_cls4tri, _ = self._cass_forward_from_features(
+                    RGB_feat, NIR_feat, None, img_path=img_path)
+                score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
+                loss_aux = torch.zeros((), device=RGB_feat.device)
+                if self.AL:
+                    ori = torch.cat([RGB_cls4tri, NIR_cls4tri, torch.zeros_like(RGB_cls4tri)], dim=-1)
+                    ori_score = self.AL_HEAD(self.AL_BN(ori))
+                    return score, cls4t, ori_score, ori, loss_aux
+                RGB_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(RGB_cls4tri))
+                NIR_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(NIR_cls4tri))
+                return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, loss_aux
             quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, None) \
                 if self.use_quality else None
             # Here, you need to change the head for the AL setting to 2*token_dim
@@ -516,11 +607,17 @@ class HTLReID(nn.Module):
         else:
             RGB = x['RGB']
             NIR = x['NI']
-            mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=None, img_path=img_path, mode=mode, writer=writer,
-                                       step=epoch)
+            mask_fre = None
+            if not self.use_cass:
+                mask_fre = self.FREQ_INDEX(x=RGB, y=NIR, z=None, img_path=img_path, mode=mode, writer=writer,
+                                           step=epoch)
             RGB_feat, RGB_attn = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             RGB_feat, NIR_feat, _ = self._adapt_features(RGB_feat, NIR_feat, None)
+            if self.use_cass:
+                _, _, cls4t, _, _, _ = self._cass_forward_from_features(
+                    RGB_feat, NIR_feat, None, img_path=img_path)
+                return cls4t
             quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], None) \
                 if self.use_quality else None
 
@@ -553,5 +650,5 @@ __factory_T_type = {
 
 def make_model(cfg, num_class, camera_num):
     model = HTLReID(num_class, cfg, camera_num, __factory_T_type)
-    print('===========Building HTL-ReID===========')
+    print('===========Building {}==========='.format(cfg.MODEL.NAME))
     return model

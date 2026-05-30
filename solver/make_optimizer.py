@@ -3,7 +3,7 @@ import torch
 
 def _is_new_module(name):
     prefixes = (
-        'HS_FACSS', 'AGF', 'QUALITY_HEAD', 'MODALITY_ADAPTERS',
+        'CASS', 'HS_FACSS', 'AGF', 'QUALITY_HEAD', 'MODALITY_ADAPTERS',
         'PART_', 'FUSE_', 'BACKBONE_HEAD', 'BACKBONE_BN', 'AL_'
     )
     return name.startswith(prefixes)
