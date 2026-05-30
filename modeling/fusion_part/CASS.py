@@ -228,41 +228,72 @@ class NeighborhoodGuidedAdapter(nn.Module):
         self.gate_groups = _largest_divisor_at_most(dim, cfg.MODEL.CASS_NGA_GATE_GROUPS)
         self.use_modal_alpha = bool(cfg.MODEL.CASS_MODAL_ALPHA)
         self.use_dynamic_topk = bool(cfg.MODEL.CASS_DYNAMIC_TOPK)
+        self.memory_warmup_epochs = int(cfg.MODEL.CASS_NGA_WARMUP_EPOCHS)
+        self.memory_ema_momentum = float(cfg.MODEL.CASS_NGA_EMA_MOMENTUM)
+        self.use_prototype_memory = bool(cfg.MODEL.CASS_NGA_USE_PROTOTYPE)
         hidden = int(cfg.MODEL.CASS_NGA_HIDDEN)
+        context_dim = len(PAIR_ORDER) * 2 + len(MODALITY_ORDER)
         alpha_out = len(MODALITY_ORDER) if self.use_modal_alpha else 1
         self.alpha_mlp = nn.Sequential(
-            nn.Linear(6, hidden),
+            nn.Linear(context_dim, hidden),
             nn.ReLU(inplace=True),
             nn.Linear(hidden, alpha_out),
         )
         if self.use_dynamic_topk:
             self.topk_mlp = nn.Sequential(
-                nn.Linear(6, hidden),
+                nn.Linear(context_dim, hidden),
                 nn.ReLU(inplace=True),
                 nn.Linear(hidden, len(MODALITY_ORDER)),
             )
         self.gate_mlp = nn.Sequential(
-            nn.Linear(6, hidden),
+            nn.Linear(context_dim, hidden),
             nn.ReLU(inplace=True),
             nn.Linear(hidden, self.gate_groups),
         )
         self.gate_scale = nn.Parameter(torch.tensor(float(cfg.MODEL.CASS_NGA_GATE_SCALE)))
         self.memory_ready = False
+        self.memory_tensor = None
         self.memory_keys = []
         self.key_to_index = {}
+        self.key_to_pid = {}
         self.memory_neighbors = {}
+        self.pid_to_proto_index = {}
+        self.prototype_neighbors = {}
 
-    def set_memory(self, features, keys, modality_names):
-        if features.numel() == 0:
+    def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
+        if features.numel() == 0 or (
+                epoch is not None and int(epoch) <= self.memory_warmup_epochs):
             self.memory_ready = False
             return
         features = F.normalize(features.detach().float(), dim=-1).cpu()
-        full = torch.zeros(features.size(0), len(MODALITY_ORDER), features.size(-1))
+        new_full = torch.zeros(features.size(0), len(MODALITY_ORDER), features.size(-1))
         for pos, name in enumerate(modality_names):
-            full[:, MODALITY_ORDER.index(name), :] = features[:, pos, :]
+            new_full[:, MODALITY_ORDER.index(name), :] = features[:, pos, :]
+        new_full = F.normalize(new_full, dim=-1)
 
-        self.memory_keys = [str(k) for k in keys]
+        keys = [str(k) for k in keys]
+        if (self.memory_tensor is not None and self.memory_keys == keys and
+                self.memory_tensor.shape == new_full.shape):
+            momentum = min(max(self.memory_ema_momentum, 0.0), 1.0)
+            full = momentum * self.memory_tensor + (1.0 - momentum) * new_full
+            full = F.normalize(full, dim=-1)
+        else:
+            full = new_full
+        self.memory_tensor = full
+
+        self.memory_keys = keys
         self.key_to_index = {key: idx for idx, key in enumerate(self.memory_keys)}
+        self.key_to_pid = {}
+        if labels is not None:
+            self.key_to_pid = {
+                key: int(labels[idx])
+                for idx, key in enumerate(self.memory_keys)
+            }
+        self._build_sample_neighbors(full)
+        self._build_prototype_neighbors(full, labels)
+        self.memory_ready = True
+
+    def _build_sample_neighbors(self, full):
         self.memory_neighbors = {}
         n = full.size(0)
         k = min(self.knn, max(n - 1, 0))
@@ -273,7 +304,31 @@ class NeighborhoodGuidedAdapter(nn.Module):
             sim = full[:, idx, :] @ full[:, idx, :].t()
             sim.fill_diagonal_(float('-inf'))
             self.memory_neighbors[idx] = sim.topk(k, dim=1).indices
-        self.memory_ready = True
+
+    def _build_prototype_neighbors(self, full, labels):
+        self.pid_to_proto_index = {}
+        self.prototype_neighbors = {}
+        if (not self.use_prototype_memory) or labels is None:
+            return
+        label_tensor = torch.tensor([int(x) for x in labels], dtype=torch.long)
+        unique = torch.unique(label_tensor, sorted=True)
+        if unique.numel() == 0:
+            return
+        prototypes = torch.zeros(unique.numel(), len(MODALITY_ORDER), full.size(-1))
+        for proto_idx, pid in enumerate(unique):
+            mask = label_tensor == pid
+            prototypes[proto_idx] = full[mask].mean(dim=0)
+            self.pid_to_proto_index[int(pid.item())] = proto_idx
+        prototypes = F.normalize(prototypes, dim=-1)
+        k = min(self.knn, max(prototypes.size(0) - 1, 0))
+        for idx, name in enumerate(MODALITY_ORDER):
+            if k == 0:
+                self.prototype_neighbors[idx] = torch.empty(
+                    prototypes.size(0), 0, dtype=torch.long)
+                continue
+            sim = prototypes[:, idx, :] @ prototypes[:, idx, :].t()
+            sim.fill_diagonal_(float('-inf'))
+            self.prototype_neighbors[idx] = sim.topk(k, dim=1).indices
 
     def _fallback_jaccard(self, cos_values):
         return [(cos.clamp(-1.0, 1.0) + 1.0) * 0.5 for cos in cos_values]
@@ -286,9 +341,15 @@ class NeighborhoodGuidedAdapter(nn.Module):
             idx = self.key_to_index.get(str(key))
             if idx is None:
                 continue
+            pid = self.key_to_pid.get(str(key))
+            proto_idx = self.pid_to_proto_index.get(pid)
             for p, (i, j) in enumerate(PAIR_ORDER):
-                a = self.memory_neighbors[i][idx]
-                b_set = self.memory_neighbors[j][idx]
+                if proto_idx is not None and self.prototype_neighbors:
+                    a = self.prototype_neighbors[i][proto_idx]
+                    b_set = self.prototype_neighbors[j][proto_idx]
+                else:
+                    a = self.memory_neighbors[i][idx]
+                    b_set = self.memory_neighbors[j][idx]
                 if a.numel() == 0 or b_set.numel() == 0:
                     continue
                 inter = torch.isin(a, b_set).sum().item()
@@ -296,7 +357,7 @@ class NeighborhoodGuidedAdapter(nn.Module):
                 out[b, p] = float(inter) / max(float(union), 1.0)
         return out
 
-    def forward(self, cls_list, modality_names, keys=None):
+    def forward(self, cls_list, modality_names, keys=None, quality_scores=None):
         batch_size = cls_list[0].size(0)
         device = cls_list[0].device
         dtype = cls_list[0].dtype
@@ -317,7 +378,14 @@ class NeighborhoodGuidedAdapter(nn.Module):
             jaccard = torch.stack(jaccard_values, dim=1)
 
         cos_tensor = torch.stack(cos_values, dim=1)
-        context = torch.cat([jaccard, cos_tensor], dim=1)
+        if quality_scores is None:
+            quality_context = torch.zeros(
+                batch_size, len(MODALITY_ORDER), device=device, dtype=dtype)
+            for name in modality_names:
+                quality_context[:, MODALITY_ORDER.index(name)] = 1.0
+        else:
+            quality_context = quality_scores.to(device=device, dtype=dtype)
+        context = torch.cat([jaccard, cos_tensor, quality_context], dim=1)
         alpha_dyn = torch.sigmoid(self.alpha_mlp(context))
         if alpha_dyn.size(1) == 1:
             alpha_dyn = alpha_dyn.expand(-1, len(MODALITY_ORDER))
@@ -358,7 +426,7 @@ class DynamicCollaborativeSelector(nn.Module):
         max_topk = max(min_topk, min(max_topk, num_tokens))
         return min_topk, max_topk
 
-    def forward(self, feat, score_self, score_structure, alpha_dyn, keep_ratio=None):
+    def forward(self, feat, score_self, score_structure, alpha_dyn, keep_ratio=None, quality=None):
         cls_token = feat[:, :1, :]
         patches = feat[:, 1:, :]
         b, n, _ = patches.shape
@@ -368,6 +436,9 @@ class DynamicCollaborativeSelector(nn.Module):
         min_k, max_k = self._topk_bounds(n)
         if self.use_dynamic_topk and keep_ratio is not None:
             keep_ratio = keep_ratio.view(b, 1).clamp(0.0, 1.0)
+            if quality is not None:
+                quality = quality.view(b, 1).clamp(0.0, 1.0)
+                keep_ratio = (keep_ratio * (0.5 + 0.5 * quality)).clamp(0.0, 1.0)
             k_float = min_k + keep_ratio.squeeze(1) * float(max_k - min_k)
             k_hard = k_float.round().long().clamp(min_k, max_k)
         else:
@@ -424,16 +495,30 @@ class ContextAwareGatedFusion(nn.Module):
     def _ordered_sources(self, target, modality_names):
         return [name for name in self.priority if name != target and name in modality_names]
 
-    def forward(self, selected, gate_bias, modality_names):
+    @staticmethod
+    def _quality(quality_scores, name, batch_size, device, dtype):
+        if quality_scores is None:
+            return torch.ones(batch_size, 1, device=device, dtype=dtype)
+        idx = MODALITY_ORDER.index(name)
+        return quality_scores[:, idx:idx + 1].to(device=device, dtype=dtype)
+
+    def forward(self, selected, gate_bias, modality_names, quality_scores=None):
         fused = {}
         for target in modality_names:
             cls = selected[target][:, 0, :]
+            batch_size = cls.size(0)
+            q_target = self._quality(
+                quality_scores, target, batch_size, cls.device, cls.dtype)
             for source in self._ordered_sources(target, modality_names):
                 key = '{}<-{}'.format(target, source)
-                delta = self.cross_blocks[key](cls, selected[source][:, 1:, :])
+                q_source = self._quality(
+                    quality_scores, source, batch_size, cls.device, cls.dtype)
+                context = selected[source][:, 1:, :] * q_source.unsqueeze(-1)
+                delta = self.cross_blocks[key](cls, context)
                 gate = torch.sigmoid(self.gates[key](torch.cat([cls, delta], dim=-1)) + gate_bias)
+                gate = gate * q_source
                 cls = (1.0 - gate) * cls + gate * delta
-            cls = cls + self.self_blocks[target](cls, selected[target][:, 1:, :])
+            cls = cls + q_target * self.self_blocks[target](cls, selected[target][:, 1:, :])
             fused[target] = cls
         return fused
 
@@ -451,10 +536,10 @@ class CASSModule(nn.Module):
         self.selector = DynamicCollaborativeSelector(cfg)
         self.fusion = ContextAwareGatedFusion(dim, num_heads=heads)
 
-    def set_memory(self, features, keys, modality_names):
-        self.nga.set_memory(features, keys, modality_names)
+    def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
+        self.nga.set_memory(features, keys, modality_names, labels=labels, epoch=epoch)
 
-    def forward(self, features, img_path=None):
+    def forward(self, features, img_path=None, quality_scores=None):
         modality_names = list(features.keys())
         enhanced = {}
         self_scores = {}
@@ -464,7 +549,11 @@ class CASSModule(nn.Module):
         enhanced_list = [enhanced[name] for name in modality_names]
         structure_scores, _ = self.sqt(enhanced_list)
         cls_list = [features[name][:, 0, :] for name in modality_names]
-        alpha_dyn, keep_ratio, gate_bias, _ = self.nga(cls_list, modality_names, keys=img_path)
+        if quality_scores is not None:
+            template = cls_list[0]
+            quality_scores = quality_scores.to(device=template.device, dtype=template.dtype)
+        alpha_dyn, keep_ratio, gate_bias, _ = self.nga(
+            cls_list, modality_names, keys=img_path, quality_scores=quality_scores)
 
         selected = {}
         masks = {}
@@ -472,15 +561,21 @@ class CASSModule(nn.Module):
             modality_idx = MODALITY_ORDER.index(name)
             alpha = alpha_dyn[:, modality_idx:modality_idx + 1]
             ratio = keep_ratio[:, modality_idx:modality_idx + 1] if keep_ratio is not None else None
+            quality = quality_scores[:, modality_idx:modality_idx + 1] \
+                if quality_scores is not None else None
             selected[name], masks[name] = self.selector(
-                enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio)
+                enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio, quality)
 
-        fused = self.fusion(selected, gate_bias, modality_names)
+        fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
         template = next(iter(fused.values()))
         descriptor_parts = []
         for name in MODALITY_ORDER:
             if name in fused:
-                descriptor_parts.append(fused[name])
+                part = fused[name]
+                if quality_scores is not None:
+                    idx = MODALITY_ORDER.index(name)
+                    part = part * quality_scores[:, idx:idx + 1]
+                descriptor_parts.append(part)
             else:
                 descriptor_parts.append(torch.zeros_like(template))
         descriptor = torch.cat(descriptor_parts, dim=-1)

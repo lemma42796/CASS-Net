@@ -1,0 +1,3 @@
+# Training sweep I1: shorter warmup. Scheduler is stepped once per epoch.
+SOLVER:
+  WARMUP_ITERS: 5

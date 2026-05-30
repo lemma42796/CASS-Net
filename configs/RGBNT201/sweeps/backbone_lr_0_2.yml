@@ -1,0 +1,3 @@
+# Training sweep J3: stronger ViT backbone fine-tuning.
+SOLVER:
+  BACKBONE_LR_FACTOR: 0.2

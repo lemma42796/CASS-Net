@@ -1,0 +1,3 @@
+# CASS design ablation L2: remove selected-token local identity branch.
+MODEL:
+  CASS_PART_BRANCH: 0

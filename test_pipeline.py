@@ -68,6 +68,8 @@ def _expected_train_outputs(cfg, modalities=3):
         base = 5
     else:
         base = 2 + 2 * modalities + 1
+    if cfg.MODEL.METHOD.upper() == 'CASS' and cfg.MODEL.CASS_PART_BRANCH:
+        base += 2
     if cfg.MODEL.METHOD.upper() != 'CASS' and cfg.MODEL.PART_BRANCH:
         base += 2
     return base
@@ -251,6 +253,38 @@ def test_ablation_switches():
             m['MODEL.AGF'], m['MODEL.OCFR'], n_params))
 
 
+def test_nga_memory_stabilization():
+    print('[7] NGA memory warmup+EMA+prototype')
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_NGA_MEMORY': 1,
+            'MODEL.CASS_NGA_WARMUP_EPOCHS': 2,
+            'MODEL.CASS_NGA_EMA_MOMENTUM': 0.5,
+            'MODEL.CASS_NGA_USE_PROTOTYPE': 1,
+        }
+    )
+    model = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).cpu()
+    dim = model.BACKBONE.token_dim
+    features = torch.randn(4, 3, dim)
+    keys = ['a', 'b', 'c', 'd']
+    labels = [0, 0, 1, 1]
+
+    model.CASS.set_memory(features, keys, ['RGB', 'NIR', 'TIR'], labels=labels, epoch=1)
+    assert not model.CASS.nga.memory_ready
+
+    model.CASS.set_memory(features, keys, ['RGB', 'NIR', 'TIR'], labels=labels, epoch=3)
+    assert model.CASS.nga.memory_ready
+    assert model.CASS.nga.prototype_neighbors
+    before = model.CASS.nga.memory_tensor.clone()
+
+    model.CASS.set_memory(features + 0.1, keys, ['RGB', 'NIR', 'TIR'], labels=labels, epoch=4)
+    after = model.CASS.nga.memory_tensor
+    assert torch.isfinite(after).all()
+    assert (before - after).abs().sum().item() > 0
+    print('     OK')
+
+
 def main():
     test_defaults_load()
     test_yml_configs_merge()
@@ -259,6 +293,7 @@ def main():
     test_two_modal_pipeline()
     test_save_load_roundtrip()
     test_ablation_switches()
+    test_nga_memory_stabilization()
     print('\n=== ALL PIPELINE TESTS PASSED ===')
 
 

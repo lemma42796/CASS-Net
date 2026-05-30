@@ -1,0 +1,3 @@
+# CASS design ablation L3: enable NGA memory from epoch 1.
+MODEL:
+  CASS_NGA_WARMUP_EPOCHS: 0

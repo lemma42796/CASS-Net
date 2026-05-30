@@ -1,0 +1,7 @@
+# CASS design ablation L0: current full algorithmic path.
+MODEL:
+  CASS_QUALITY_AWARE: 1
+  CASS_PART_BRANCH: 1
+  CASS_NGA_WARMUP_EPOCHS: 5
+  CASS_NGA_EMA_MOMENTUM: 0.5
+  CASS_NGA_USE_PROTOTYPE: 1

@@ -176,9 +176,11 @@ class HTLReID(nn.Module):
         self.use_agf = bool(cfg.MODEL.AGF) and not self.use_cass
         self.use_ocfr = bool(cfg.MODEL.OCFR) and not self.use_cass
         self.use_quality = bool(cfg.MODEL.QUALITY_AWARE) and not self.use_cass
+        self.use_cass_quality = self.use_cass and bool(cfg.MODEL.CASS_QUALITY_AWARE)
         self.use_adapter = bool(cfg.MODEL.MODALITY_ADAPTER) and not self.use_cass
         self.use_part = bool(cfg.MODEL.PART_BRANCH) and not self.use_cass
-        self.part_num = int(cfg.MODEL.PART_NUM)
+        self.use_cass_part = self.use_cass and bool(cfg.MODEL.CASS_PART_BRANCH)
+        self.part_num = int(cfg.MODEL.CASS_PART_NUM if self.use_cass else cfg.MODEL.PART_NUM)
         self.modality_drop_prob = 0.0 if self.use_cass else float(cfg.INPUT.MODALITY_DROP_PROB)
         self.align_loss_weight = float(cfg.MODEL.ALIGN_LOSS_WEIGHT)
         self.token_consistency_weight = float(cfg.MODEL.TOKEN_CONSISTENCY_WEIGHT)
@@ -199,7 +201,7 @@ class HTLReID(nn.Module):
                                        cfg.MODEL.MODALITY_ADAPTER_DIM,
                                        cfg.MODEL.MODALITY_ADAPTER_SCALE),
             })
-        if self.use_quality:
+        if self.use_quality or self.use_cass_quality:
             self.QUALITY_HEAD = ModalityQualityHead(
                 dim=self.BACKBONE.token_dim,
                 hidden=cfg.MODEL.QUALITY_HIDDEN,
@@ -239,7 +241,7 @@ class HTLReID(nn.Module):
             self.AL_BN = nn.BatchNorm1d(3 * self.BACKBONE.token_dim)
             self.AL_HEAD.apply(weights_init_classifier)
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        if self.use_part:
+        if self.use_part or self.use_cass_part:
             part_dim = 3 * self.part_num * self.BACKBONE.token_dim
             self.PART_BN = nn.BatchNorm1d(part_dim)
             self.PART_HEAD = nn.Linear(part_dim, num_classes, bias=False)
@@ -340,11 +342,13 @@ class HTLReID(nn.Module):
 
         return loss
 
-    def _cass_forward_from_features(self, rgb_feat, nir_feat, tir_feat=None, img_path=None):
+    def _cass_forward_from_features(self, rgb_feat, nir_feat, tir_feat=None, img_path=None,
+                                    quality_scores=None):
         features = {'RGB': rgb_feat, 'NIR': nir_feat}
         if tir_feat is not None:
             features['TIR'] = tir_feat
-        selected, masks, fused, cls4t = self.CASS(features, img_path=img_path)
+        selected, masks, fused, cls4t = self.CASS(
+            features, img_path=img_path, quality_scores=quality_scores)
         rgb_cls = fused['RGB']
         nir_cls = fused['NIR']
         tir_cls = fused.get('TIR')
@@ -354,15 +358,16 @@ class HTLReID(nn.Module):
             return selected, (masks['RGB'], masks['NIR']), cls4t, rgb_cls, nir_cls, tir_cls
         return selected, (masks['RGB'], masks['NIR'], masks['TIR']), cls4t, rgb_cls, nir_cls, tir_cls
 
-    def refresh_nga_memory(self, train_loader, device='cuda', logger=None):
+    def refresh_nga_memory(self, train_loader, device='cuda', logger=None, epoch=None):
         if (not self.use_cass_memory) or train_loader is None:
             return
         was_training = self.training
         self.eval()
         memory_chunks = []
         keys = []
+        labels = []
         with torch.no_grad():
-            for img, _, _, camids, target_view, img_paths in train_loader:
+            for img, pids, _, camids, target_view, img_paths in train_loader:
                 img = {
                     'RGB': img['RGB'].to(device),
                     'NI': img['NI'].to(device),
@@ -380,11 +385,15 @@ class HTLReID(nn.Module):
                 ], dim=1)
                 memory_chunks.append(cls.cpu())
                 keys.extend([str(p) for p in img_paths])
+                labels.extend([int(p) for p in pids])
         if memory_chunks:
             memory = torch.cat(memory_chunks, dim=0)
-            self.CASS.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'])
+            self.CASS.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'], labels=labels, epoch=epoch)
             if logger is not None:
-                logger.info('Refreshed CASS NGA memory: {} samples'.format(memory.size(0)))
+                if self.CASS.nga.memory_ready:
+                    logger.info('Refreshed CASS NGA memory: {} samples'.format(memory.size(0)))
+                else:
+                    logger.info('Skipped CASS NGA memory refresh during warmup')
         if was_training:
             self.train()
 
@@ -432,17 +441,31 @@ class HTLReID(nn.Module):
             NIR_cls4tri = NIR_feat[:, 0, :]
             TIR_cls4tri = TIR_feat[:, 0, :]
             if self.use_cass:
-                _, _, cls4t, RGB_cls4tri, NIR_cls4tri, TIR_cls4tri = self._cass_forward_from_features(
-                    RGB_feat, NIR_feat, TIR_feat, img_path=img_path)
+                quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, TIR_cls4tri) \
+                    if self.use_cass_quality else None
+                selected, masks, cls4t, RGB_cls4tri, NIR_cls4tri, TIR_cls4tri = \
+                    self._cass_forward_from_features(
+                        RGB_feat, NIR_feat, TIR_feat, img_path=img_path,
+                        quality_scores=quality_scores)
                 score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
-                loss_aux = torch.zeros((), device=RGB_feat.device)
+                loss_aux = self._auxiliary_losses(
+                    selected['RGB'], selected['NIR'], selected['TIR'],
+                    masks, quality_scores, has_tir=True)
+                if self.use_cass_part:
+                    part_feat = self._part_feature(
+                        selected['RGB'], selected['NIR'], selected['TIR'], quality_scores)
+                    part_score = self.PART_HEAD(self.PART_BN(part_feat))
                 if self.AL:
                     ori = torch.cat([RGB_cls4tri, NIR_cls4tri, TIR_cls4tri], dim=-1)
                     ori_score = self.AL_HEAD(self.AL_BN(ori))
+                    if self.use_cass_part:
+                        return score, cls4t, ori_score, ori, part_score, part_feat, loss_aux
                     return score, cls4t, ori_score, ori, loss_aux
                 RGB_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(RGB_cls4tri))
                 NIR_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(NIR_cls4tri))
                 TIR_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(TIR_cls4tri))
+                if self.use_cass_part:
+                    return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, TIR_cls_score, TIR_cls4tri, part_score, part_feat, loss_aux
                 return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, TIR_cls_score, TIR_cls4tri, loss_aux
             quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, TIR_cls4tri) \
                 if self.use_quality else None
@@ -503,8 +526,12 @@ class HTLReID(nn.Module):
             TIR_feat, TIR_attn = self.BACKBONE(TIR, cam_label=cam_label, view_label=view_label)
             RGB_feat, NIR_feat, TIR_feat = self._adapt_features(RGB_feat, NIR_feat, TIR_feat)
             if self.use_cass:
+                quality_scores = self.QUALITY_HEAD(
+                    RGB_feat[:, 0, :], NIR_feat[:, 0, :], TIR_feat[:, 0, :]) \
+                    if self.use_cass_quality else None
                 _, _, cls4t, _, _, _ = self._cass_forward_from_features(
-                    RGB_feat, NIR_feat, TIR_feat, img_path=img_path)
+                    RGB_feat, NIR_feat, TIR_feat, img_path=img_path,
+                    quality_scores=quality_scores)
                 return cls4t
             quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], TIR_feat[:, 0, :]) \
                 if self.use_quality else None
@@ -545,16 +572,31 @@ class HTLReID(nn.Module):
             RGB_cls4tri = RGB_feat[:, 0, :]
             NIR_cls4tri = NIR_feat[:, 0, :]
             if self.use_cass:
-                _, _, cls4t, RGB_cls4tri, NIR_cls4tri, _ = self._cass_forward_from_features(
-                    RGB_feat, NIR_feat, None, img_path=img_path)
+                quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, None) \
+                    if self.use_cass_quality else None
+                selected, masks, cls4t, RGB_cls4tri, NIR_cls4tri, _ = \
+                    self._cass_forward_from_features(
+                        RGB_feat, NIR_feat, None, img_path=img_path,
+                        quality_scores=quality_scores)
                 score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
-                loss_aux = torch.zeros((), device=RGB_feat.device)
+                TIR_selected = torch.zeros_like(selected['RGB'])
+                loss_aux = self._auxiliary_losses(
+                    selected['RGB'], selected['NIR'], TIR_selected,
+                    masks, quality_scores, has_tir=False)
+                if self.use_cass_part:
+                    part_feat = self._part_feature(
+                        selected['RGB'], selected['NIR'], TIR_selected, quality_scores)
+                    part_score = self.PART_HEAD(self.PART_BN(part_feat))
                 if self.AL:
                     ori = torch.cat([RGB_cls4tri, NIR_cls4tri, torch.zeros_like(RGB_cls4tri)], dim=-1)
                     ori_score = self.AL_HEAD(self.AL_BN(ori))
+                    if self.use_cass_part:
+                        return score, cls4t, ori_score, ori, part_score, part_feat, loss_aux
                     return score, cls4t, ori_score, ori, loss_aux
                 RGB_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(RGB_cls4tri))
                 NIR_cls_score = self.BACKBONE_HEAD(self.BACKBONE_BN(NIR_cls4tri))
+                if self.use_cass_part:
+                    return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, part_score, part_feat, loss_aux
                 return score, cls4t, RGB_cls_score, RGB_cls4tri, NIR_cls_score, NIR_cls4tri, loss_aux
             quality_scores = self.QUALITY_HEAD(RGB_cls4tri, NIR_cls4tri, None) \
                 if self.use_quality else None
@@ -615,8 +657,11 @@ class HTLReID(nn.Module):
             NIR_feat, NIR_attn = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
             RGB_feat, NIR_feat, _ = self._adapt_features(RGB_feat, NIR_feat, None)
             if self.use_cass:
+                quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], None) \
+                    if self.use_cass_quality else None
                 _, _, cls4t, _, _, _ = self._cass_forward_from_features(
-                    RGB_feat, NIR_feat, None, img_path=img_path)
+                    RGB_feat, NIR_feat, None, img_path=img_path,
+                    quality_scores=quality_scores)
                 return cls4t
             quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], None) \
                 if self.use_quality else None

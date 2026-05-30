@@ -1,0 +1,3 @@
+# Training sweep J2: current default ViT backbone fine-tuning rate.
+SOLVER:
+  BACKBONE_LR_FACTOR: 0.1

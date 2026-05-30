@@ -1,0 +1,3 @@
+# CASS design ablation L4: use the current epoch memory without EMA smoothing.
+MODEL:
+  CASS_NGA_EMA_MOMENTUM: 0.0

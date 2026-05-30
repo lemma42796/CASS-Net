@@ -1,0 +1,3 @@
+# Training sweep K3: stronger AdamW regularization.
+SOLVER:
+  WEIGHT_DECAY: 0.1

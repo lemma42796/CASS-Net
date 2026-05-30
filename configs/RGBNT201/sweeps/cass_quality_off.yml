@@ -1,0 +1,3 @@
+# CASS design ablation L1: remove modality-quality guidance from CASS.
+MODEL:
+  CASS_QUALITY_AWARE: 0

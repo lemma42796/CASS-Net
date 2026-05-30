@@ -1,0 +1,3 @@
+# CASS design ablation L5: use sample-level memory neighbors only.
+MODEL:
+  CASS_NGA_USE_PROTOTYPE: 0

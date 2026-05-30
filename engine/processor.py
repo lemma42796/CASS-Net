@@ -9,6 +9,13 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
 
+
+def _cfg_enabled(value):
+    if isinstance(value, str):
+        return value.lower() in ('yes', 'true', '1', 'on')
+    return bool(value)
+
+
 def normalize(x, axis=-1):
     """Normalizing to unit length along the specified dimension.
     Args:
@@ -52,7 +59,12 @@ def do_train(cfg,
     if cfg.DATASETS.NAMES == "MSVR310":
         evaluator_m = R1_mAP(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     else:
-        evaluator_m = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
+        evaluator_m = R1_mAP_eval(
+            num_query,
+            max_rank=50,
+            feat_norm=cfg.TEST.FEAT_NORM,
+            reranking=_cfg_enabled(cfg.TEST.RE_RANKING),
+        )
     evaluator_m.reset()
 
 
@@ -70,7 +82,8 @@ def do_train(cfg,
         model_for_memory = model.module if hasattr(model, 'module') else model
         refresh_period = max(1, int(getattr(cfg.MODEL, 'CASS_NGA_REFRESH_PERIOD', 1)))
         if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS' and (epoch - 1) % refresh_period == 0:
-            model_for_memory.refresh_nga_memory(train_loader_normal, device=device, logger=logger)
+            model_for_memory.refresh_nga_memory(
+                train_loader_normal, device=device, logger=logger, epoch=epoch)
         model.train()
         for n_iter, (img, vid, target_cam, target_view, imgpath) in enumerate(train_loader):
             optimizer.zero_grad()
@@ -230,7 +243,12 @@ def do_inference(cfg,
     if cfg.DATASETS.NAMES == "MSVR310":
         evaluator_m = R1_mAP(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     else:
-        evaluator_m = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
+        evaluator_m = R1_mAP_eval(
+            num_query,
+            max_rank=50,
+            feat_norm=cfg.TEST.FEAT_NORM,
+            reranking=_cfg_enabled(cfg.TEST.RE_RANKING),
+        )
     evaluator_m.reset()
 
 

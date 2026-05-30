@@ -1,0 +1,3 @@
+# Training sweep K2: current default AdamW regularization.
+SOLVER:
+  WEIGHT_DECAY: 0.05
