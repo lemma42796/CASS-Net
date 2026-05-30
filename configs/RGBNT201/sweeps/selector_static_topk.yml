@@ -1,0 +1,3 @@
+# CASS selector ablation G1: disable dynamic per-sample Top-K.
+MODEL:
+  CASS_DYNAMIC_TOPK: 0

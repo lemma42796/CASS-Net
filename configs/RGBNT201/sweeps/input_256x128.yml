@@ -1,0 +1,4 @@
+# CASS sweep A1: canonical 16x8 token grid.
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]

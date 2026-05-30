@@ -1,0 +1,3 @@
+# CASS sweep B2: medium-low token retention.
+MODEL:
+  CASS_TOPK: 48

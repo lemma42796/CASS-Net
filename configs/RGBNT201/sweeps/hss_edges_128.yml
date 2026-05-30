@@ -1,0 +1,3 @@
+# CASS sweep C1: smaller HSS hyperedge bank.
+MODEL:
+  CASS_HSS_EDGES: 128

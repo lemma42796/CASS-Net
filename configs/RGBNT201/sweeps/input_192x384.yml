@@ -1,0 +1,4 @@
+# CASS sweep A3: transposed high-resolution grid.
+INPUT:
+  SIZE_TRAIN: [192, 384]
+  SIZE_TEST: [192, 384]

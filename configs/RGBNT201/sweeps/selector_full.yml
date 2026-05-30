@@ -1,0 +1,5 @@
+# CASS selector ablation G4: dynamic Top-K + modality alpha + soft residual.
+MODEL:
+  CASS_DYNAMIC_TOPK: 1
+  CASS_MODAL_ALPHA: 1
+  CASS_SOFT_RESIDUAL_WEIGHT: 0.05

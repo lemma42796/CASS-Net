@@ -1,0 +1,3 @@
+# CASS sweep B1: conservative token retention.
+MODEL:
+  CASS_TOPK: 32

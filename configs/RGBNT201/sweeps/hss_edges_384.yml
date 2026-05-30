@@ -1,0 +1,3 @@
+# CASS sweep C3: larger HSS hyperedge bank.
+MODEL:
+  CASS_HSS_EDGES: 384

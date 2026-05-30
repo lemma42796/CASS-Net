@@ -1,0 +1,3 @@
+# CASS selector ablation G2: use one shared alpha for all modalities.
+MODEL:
+  CASS_MODAL_ALPHA: 0

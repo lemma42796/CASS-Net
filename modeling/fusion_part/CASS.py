@@ -226,12 +226,21 @@ class NeighborhoodGuidedAdapter(nn.Module):
         self.dim = dim
         self.knn = int(cfg.MODEL.CASS_NGA_KNN)
         self.gate_groups = _largest_divisor_at_most(dim, cfg.MODEL.CASS_NGA_GATE_GROUPS)
+        self.use_modal_alpha = bool(cfg.MODEL.CASS_MODAL_ALPHA)
+        self.use_dynamic_topk = bool(cfg.MODEL.CASS_DYNAMIC_TOPK)
         hidden = int(cfg.MODEL.CASS_NGA_HIDDEN)
+        alpha_out = len(MODALITY_ORDER) if self.use_modal_alpha else 1
         self.alpha_mlp = nn.Sequential(
             nn.Linear(6, hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, 1),
+            nn.Linear(hidden, alpha_out),
         )
+        if self.use_dynamic_topk:
+            self.topk_mlp = nn.Sequential(
+                nn.Linear(6, hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden, len(MODALITY_ORDER)),
+            )
         self.gate_mlp = nn.Sequential(
             nn.Linear(6, hidden),
             nn.ReLU(inplace=True),
@@ -310,21 +319,28 @@ class NeighborhoodGuidedAdapter(nn.Module):
         cos_tensor = torch.stack(cos_values, dim=1)
         context = torch.cat([jaccard, cos_tensor], dim=1)
         alpha_dyn = torch.sigmoid(self.alpha_mlp(context))
+        if alpha_dyn.size(1) == 1:
+            alpha_dyn = alpha_dyn.expand(-1, len(MODALITY_ORDER))
+        keep_ratio = torch.sigmoid(self.topk_mlp(context)) if self.use_dynamic_topk else None
         group_bias = torch.tanh(self.gate_mlp(context)) * self.gate_scale
         repeat = self.dim // self.gate_groups
         gate_bias = group_bias.repeat_interleave(repeat, dim=1)
         if gate_bias.size(1) < self.dim:
             pad = self.dim - gate_bias.size(1)
             gate_bias = F.pad(gate_bias, (0, pad))
-        return alpha_dyn, gate_bias[:, :self.dim], context
+        return alpha_dyn, keep_ratio, gate_bias[:, :self.dim], context
 
 
 class DynamicCollaborativeSelector(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.topk = int(cfg.MODEL.CASS_TOPK)
+        self.use_dynamic_topk = bool(cfg.MODEL.CASS_DYNAMIC_TOPK)
+        self.min_topk = int(cfg.MODEL.CASS_MIN_TOPK)
+        self.max_topk = int(cfg.MODEL.CASS_MAX_TOPK)
         self.use_ste = bool(cfg.MODEL.CASS_STE)
         self.ste_tau = float(cfg.MODEL.CASS_STE_TAU)
+        self.soft_residual_weight = float(cfg.MODEL.CASS_SOFT_RESIDUAL_WEIGHT)
 
     @staticmethod
     def _minmax(score, eps=1e-8):
@@ -332,21 +348,48 @@ class DynamicCollaborativeSelector(nn.Module):
         hi = score.max(dim=1, keepdim=True).values
         return (score - lo) / (hi - lo + eps)
 
-    def forward(self, feat, score_self, score_structure, alpha_dyn):
+    def _topk_bounds(self, num_tokens):
+        base = max(1, min(self.topk, num_tokens))
+        if not self.use_dynamic_topk:
+            return base, base
+        min_topk = self.min_topk if self.min_topk > 0 else max(1, base // 2)
+        max_topk = self.max_topk if self.max_topk > 0 else base + max(1, base // 2)
+        min_topk = max(1, min(min_topk, num_tokens))
+        max_topk = max(min_topk, min(max_topk, num_tokens))
+        return min_topk, max_topk
+
+    def forward(self, feat, score_self, score_structure, alpha_dyn, keep_ratio=None):
         cls_token = feat[:, :1, :]
         patches = feat[:, 1:, :]
         b, n, _ = patches.shape
         s_self = self._minmax(score_self)
         s_structure = self._minmax(score_structure)
         score = (1.0 - alpha_dyn) * s_self + alpha_dyn * s_structure
-        k = min(self.topk, n)
-        topk_idx = score.topk(k, dim=1).indices
+        min_k, max_k = self._topk_bounds(n)
+        if self.use_dynamic_topk and keep_ratio is not None:
+            keep_ratio = keep_ratio.view(b, 1).clamp(0.0, 1.0)
+            k_float = min_k + keep_ratio.squeeze(1) * float(max_k - min_k)
+            k_hard = k_float.round().long().clamp(min_k, max_k)
+        else:
+            k_float = torch.full((b,), float(max_k), device=patches.device, dtype=patches.dtype)
+            k_hard = torch.full((b,), max_k, device=patches.device, dtype=torch.long)
+
+        topk_count = int(k_hard.max().item())
+        topk_idx = score.topk(topk_count, dim=1).indices
+        active = torch.arange(topk_count, device=patches.device).view(1, -1)
+        active = active < k_hard.view(-1, 1)
         mask = torch.zeros(b, n, device=patches.device, dtype=torch.bool)
-        mask.scatter_(1, topk_idx, True)
+        mask.scatter_(1, topk_idx, active)
 
         hard = mask.to(patches.dtype)
+        residual = min(max(self.soft_residual_weight, 0.0), 1.0)
+        if residual > 0.0:
+            hard = residual + (1.0 - residual) * hard
         if self.use_ste and self.training:
-            soft = F.softmax(score / self.ste_tau, dim=1)
+            soft = F.softmax(score / self.ste_tau, dim=1) * k_float.view(b, 1).to(score.dtype)
+            soft = soft.clamp(max=1.0)
+            if residual > 0.0:
+                soft = residual + (1.0 - residual) * soft
             gate = hard + soft - soft.detach()
         else:
             gate = hard
@@ -421,13 +464,16 @@ class CASSModule(nn.Module):
         enhanced_list = [enhanced[name] for name in modality_names]
         structure_scores, _ = self.sqt(enhanced_list)
         cls_list = [features[name][:, 0, :] for name in modality_names]
-        alpha_dyn, gate_bias, _ = self.nga(cls_list, modality_names, keys=img_path)
+        alpha_dyn, keep_ratio, gate_bias, _ = self.nga(cls_list, modality_names, keys=img_path)
 
         selected = {}
         masks = {}
         for idx, name in enumerate(modality_names):
+            modality_idx = MODALITY_ORDER.index(name)
+            alpha = alpha_dyn[:, modality_idx:modality_idx + 1]
+            ratio = keep_ratio[:, modality_idx:modality_idx + 1] if keep_ratio is not None else None
             selected[name], masks[name] = self.selector(
-                enhanced[name], self_scores[name], structure_scores[idx], alpha_dyn)
+                enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio)
 
         fused = self.fusion(selected, gate_bias, modality_names)
         template = next(iter(fused.values()))

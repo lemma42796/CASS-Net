@@ -1,0 +1,3 @@
+# CASS sweep E2: current default NGA neighborhood.
+MODEL:
+  CASS_NGA_KNN: 20

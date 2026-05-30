@@ -1,0 +1,3 @@
+# CASS sweep D1: weaker HSS residual graph update.
+MODEL:
+  CASS_HSS_GRAPH_WEIGHT: 0.5

@@ -68,7 +68,8 @@ def do_train(cfg,
         acc_meter.reset()
         scheduler.step(epoch)
         model_for_memory = model.module if hasattr(model, 'module') else model
-        if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS':
+        refresh_period = max(1, int(getattr(cfg.MODEL, 'CASS_NGA_REFRESH_PERIOD', 1)))
+        if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS' and (epoch - 1) % refresh_period == 0:
             model_for_memory.refresh_nga_memory(train_loader_normal, device=device, logger=logger)
         model.train()
         for n_iter, (img, vid, target_cam, target_view, imgpath) in enumerate(train_loader):

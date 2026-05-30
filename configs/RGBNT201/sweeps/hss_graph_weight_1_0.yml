@@ -1,0 +1,3 @@
+# CASS sweep D2: current default HSS residual graph update.
+MODEL:
+  CASS_HSS_GRAPH_WEIGHT: 1.0

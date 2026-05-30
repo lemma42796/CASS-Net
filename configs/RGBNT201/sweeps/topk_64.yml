@@ -1,0 +1,3 @@
+# CASS sweep B3: current default token retention.
+MODEL:
+  CASS_TOPK: 64

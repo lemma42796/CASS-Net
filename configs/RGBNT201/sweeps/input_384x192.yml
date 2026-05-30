@@ -1,0 +1,4 @@
+# CASS sweep A2: higher-resolution portrait grid.
+INPUT:
+  SIZE_TRAIN: [384, 192]
+  SIZE_TEST: [384, 192]

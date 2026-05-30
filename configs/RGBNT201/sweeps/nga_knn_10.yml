@@ -1,0 +1,3 @@
+# CASS sweep E1: smaller NGA neighborhood.
+MODEL:
+  CASS_NGA_KNN: 10

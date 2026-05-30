@@ -1,0 +1,3 @@
+# CASS sweep C2: current default HSS hyperedge bank.
+MODEL:
+  CASS_HSS_EDGES: 256

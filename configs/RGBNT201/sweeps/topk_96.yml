@@ -1,0 +1,3 @@
+# CASS sweep B4: aggressive token retention.
+MODEL:
+  CASS_TOPK: 96

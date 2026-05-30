@@ -1,0 +1,3 @@
+# CASS sweep F3: refresh NGA memory every 5 epochs.
+MODEL:
+  CASS_NGA_REFRESH_PERIOD: 5

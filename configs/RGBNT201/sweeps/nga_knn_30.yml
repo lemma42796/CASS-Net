@@ -1,0 +1,3 @@
+# CASS sweep E3: larger NGA neighborhood.
+MODEL:
+  CASS_NGA_KNN: 30
