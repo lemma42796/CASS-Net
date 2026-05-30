@@ -9,11 +9,16 @@ Official implementation of the manuscript "**Hierarchical Token Learning and Ada
 
 ## Overview
 
-HTL-ReID is a unified framework for multi-modal (RGB / NIR / TIR) object re-identification. It combines three coordinated components:
+HTL-ReID is a unified framework for nighttime multi-modal (RGB / NIR / TIR) object re-identification. The current implementation extends the original HTL design into a quality-aware token selection and fusion pipeline:
 
 - **Hierarchical Token Selection (HS)** — aggregates attention cues from shallow, middle, and deep ViT layers as complementary spatial priors, while keeping all token features in a single deep semantic space.
-- **Fusion-Aware Synergistic Selection (FACSS)** — jointly scores intra-modal discriminability and cross-modal cosine consensus, modulated by an environment-aware dynamic weight.
-- **Adaptive Gated Fusion (AGF)** — channel-wise convex interpolation gating that calibrates fusion intensity according to modality reliability.
+- **Dynamic FACSS** — jointly scores intra-modal discriminability and quality-weighted cross-modal cosine consensus, predicts a per-sample/per-modality token budget, and keeps a soft residual path outside hard top-k selection.
+- **Nighttime modality quality estimation** — predicts RGB / NIR / TIR reliability with a night-scene prior so weak RGB, overexposed NIR, or noisy TIR evidence can be down-weighted per sample.
+- **Quality-aware graph fusion** — replaces fixed rotation fusion with a fully connected RGB-NIR-TIR graph whose edge gates are conditioned on modality quality.
+- **Modality adapters and local part branch** — adds lightweight modality-specific adapters after the shared ViT backbone and a selected-token part-level branch for local identity evidence.
+- **Cross-modal auxiliary constraints** — adds quality-weighted alignment, token-consistency, and gate-balance losses during training.
+
+HSL is not part of the current model path.
 
 ## Requirements
 ```bash
@@ -42,6 +47,8 @@ python train_net.py --config_file configs/RGBNT100/default.yml
 python train_net.py --config_file configs/MSVR310/default.yml
 ```
 
+The default training recipe uses AdamW, a smaller learning rate for the shared ViT backbone, higher-resolution inputs, grayscale patch replacement, modality dropout, ID + triplet supervision, part-branch supervision, and cross-modal auxiliary losses.
+
 You can override any config field from the command line, e.g.:
 ```bash
 python train_net.py --config_file configs/RGBNT201/default.yml \
@@ -54,6 +61,17 @@ python train_net.py --config_file configs/RGBNT201/default.yml \
 python test_net.py --config_file configs/RGBNT201/default.yml \
     TEST.WEIGHT /path/to/checkpoint.pth
 ```
+
+`TEST.RE_RANKING` is enabled by default in the dataset YAML files for final evaluation.
+
+## Smoke Test
+Run the CPU-only pipeline test after installation or code changes:
+
+```bash
+python test_pipeline.py
+```
+
+The smoke test checks config merging, 3-modal and 2-modal forward/backward passes, save/load round-trip, and ablation switches without real datasets or pretrained weights.
 
 ## Citation
 If you find this work useful, please cite:
