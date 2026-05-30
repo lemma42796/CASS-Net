@@ -115,21 +115,25 @@ class HypergraphConv2d(nn.Module):
         assign = assign.view(b, self.vertices, self.edges)
 
         incidence = torch.matmul(phi, torch.matmul(metric, torch.matmul(phi.transpose(1, 2), assign))).abs()
+        incidence = torch.nan_to_num(incidence, nan=0.0, posinf=0.0, neginf=0.0)
         if self.theta > 0.0:
             threshold = self.theta * incidence.mean(dim=(1, 2), keepdim=True)
             incidence = torch.where(incidence < threshold, torch.zeros_like(incidence), incidence)
 
         node_degree = incidence.sum(dim=2)
         incidence_norm = node_degree.clamp_min(1e-6).pow(-0.5).unsqueeze(-1) * incidence
+        incidence_norm = torch.nan_to_num(incidence_norm, nan=0.0, posinf=0.0, neginf=0.0)
         edge_degree = incidence.sum(dim=1)
         edge_degree = torch.diag_embed(edge_degree.clamp_min(1e-6).pow(-1.0))
 
         features = x_float.permute(0, 2, 3, 1).contiguous().view(b, self.vertices, self.dim)
         propagated = torch.matmul(incidence_norm, torch.matmul(edge_degree, torch.matmul(
             incidence_norm.transpose(1, 2), features)))
+        propagated = torch.nan_to_num(propagated, nan=0.0, posinf=0.0, neginf=0.0)
         out = torch.matmul(features - propagated, self.weight.float())
         if self.bias is not None:
             out = out + self.bias.float()
+        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         out = out.permute(0, 2, 1).contiguous().view(b, self.dim, self.feat_h, self.feat_w)
         return out.to(orig_dtype)
 
