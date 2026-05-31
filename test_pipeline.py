@@ -18,6 +18,7 @@ Coverage:
  9. state_dict save -> reload -> identical forward output
  10. local/timm pretrained source loader
  11. Ablation switches (AGF=0, OCFR=1) each produce a usable model
+ 12. Full training checkpoint save -> resume round-trip
 
 Run:
     python3 test_pipeline.py
@@ -421,6 +422,60 @@ def test_resume_weight_loader():
     print('     OK')
 
 
+def test_training_checkpoint_roundtrip():
+    print('[12] full training checkpoint round-trip')
+    import tempfile
+    from utils.checkpoint import load_training_checkpoint, save_training_checkpoint
+
+    cfg = _make_cfg('configs/RGBNT201/default.yml')
+    model = torch.nn.Linear(3, 2)
+    center = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    optimizer_center = torch.optim.SGD(center.parameters(), lr=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+    scaler = torch.cuda.amp.GradScaler(enabled=False)
+
+    loss = model(torch.randn(4, 3)).sum()
+    loss.backward()
+    optimizer.step()
+    scheduler.step()
+    saved_weight = model.weight.detach().clone()
+
+    best_index = {'mAP': 0.72, 'Rank-1': 0.68, 'Rank-5': 0.70, 'Rank-10': 0.73}
+    with tempfile.NamedTemporaryFile(suffix='.pth') as fh:
+        save_training_checkpoint(
+            fh.name,
+            cfg,
+            model,
+            center,
+            optimizer,
+            optimizer_center,
+            scheduler,
+            scaler,
+            epoch=3,
+            best_index=best_index,
+        )
+        with torch.no_grad():
+            model.weight.add_(10.0)
+        optimizer.param_groups[0]['lr'] = 0.001
+
+        info = load_training_checkpoint(
+            fh.name,
+            model,
+            center,
+            optimizer,
+            optimizer_center,
+            scheduler,
+            scaler,
+        )
+
+    assert info['start_epoch'] == 4
+    assert abs(info['best_index']['mAP'] - best_index['mAP']) < 1e-12
+    assert torch.allclose(model.weight, saved_weight)
+    assert abs(optimizer.param_groups[0]['lr'] - 0.01) < 1e-12
+    print('     OK')
+
+
 def main():
     test_defaults_load()
     test_yml_configs_merge()
@@ -434,6 +489,7 @@ def main():
     test_nga_memory_stabilization()
     test_hss_graph_warmup()
     test_resume_weight_loader()
+    test_training_checkpoint_roundtrip()
     print('\n=== ALL PIPELINE TESTS PASSED ===')
 
 

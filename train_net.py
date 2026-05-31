@@ -71,7 +71,12 @@ if __name__ == '__main__':
         cfg)
     print("data is ready")
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num)
-    load_resume_weights(cfg, model, logger)
+    full_resume = str(getattr(cfg.SOLVER, 'RESUME_CHECKPOINT', '')).strip()
+    if full_resume:
+        if str(getattr(cfg.MODEL, 'RESUME_PATH', '')).strip():
+            logger.warning('Ignoring MODEL.RESUME_PATH because SOLVER.RESUME_CHECKPOINT is set.')
+    else:
+        load_resume_weights(cfg, model, logger)
 
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
 

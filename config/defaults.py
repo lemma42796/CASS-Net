@@ -225,6 +225,10 @@ _C.SOLVER.COSINE_MARGIN = 0.5
 _C.SOLVER.COSINE_SCALE = 30
 _C.SOLVER.SEED = 1111
 _C.SOLVER.AMP = True
+# Full training checkpoint for exact continuation. Unlike MODEL.RESUME_PATH,
+# this restores model, optimizer, scheduler, scaler, epoch, RNG, and best metrics.
+_C.SOLVER.RESUME_CHECKPOINT = ''
+_C.SOLVER.SAVE_LATEST_CHECKPOINT = True
 _C.MODEL.NO_MARGIN = True
 # epoch number of saving checkpoints
 _C.SOLVER.CHECKPOINT_PERIOD = 60

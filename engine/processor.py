@@ -8,12 +8,19 @@ from torch.cuda import amp
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
+from utils.checkpoint import load_training_checkpoint, save_training_checkpoint
 
 
 def _cfg_enabled(value):
     if isinstance(value, str):
         return value.lower() in ('yes', 'true', '1', 'on')
     return bool(value)
+
+
+def _is_main_process(cfg):
+    if not cfg.MODEL.DIST_TRAIN:
+        return True
+    return dist.is_available() and dist.is_initialized() and dist.get_rank() == 0
 
 
 def normalize(x, axis=-1):
@@ -41,6 +48,7 @@ def do_train(cfg,
     log_period = cfg.SOLVER.LOG_PERIOD
     checkpoint_period = cfg.SOLVER.CHECKPOINT_PERIOD
     eval_period = cfg.SOLVER.EVAL_PERIOD
+    save_latest_checkpoint = _cfg_enabled(getattr(cfg.SOLVER, 'SAVE_LATEST_CHECKPOINT', True))
     device = "cuda"
     epochs = cfg.SOLVER.MAX_EPOCHS
     logging.getLogger().setLevel(logging.INFO)
@@ -75,7 +83,29 @@ def do_train(cfg,
     scaler = amp.GradScaler(enabled=amp_enabled)
 
     best_index = {'mAP': 0, "Rank-1": 0, 'Rank-5': 0, 'Rank-10': 0}
-    for epoch in range(1, epochs + 1):
+    start_epoch = 1
+    resume_checkpoint = str(getattr(cfg.SOLVER, 'RESUME_CHECKPOINT', '')).strip()
+    if resume_checkpoint:
+        resume_info = load_training_checkpoint(
+            resume_checkpoint,
+            model,
+            center_criterion,
+            optimizer,
+            optimizer_center,
+            scheduler,
+            scaler,
+            logger=logger,
+            map_location=device,
+        )
+        start_epoch = resume_info['start_epoch']
+        best_index.update(resume_info.get('best_index') or {})
+    if start_epoch > epochs:
+        logger.info('Resume checkpoint is already at epoch {}; MAX_EPOCHS is {}. Nothing to train.'.format(
+            start_epoch - 1, epochs))
+        writer.close()
+        return None
+
+    for epoch in range(start_epoch, epochs + 1):
         start_time = time.time()
         loss_meter.reset()
         evaluator_m.reset()
@@ -236,6 +266,22 @@ def do_train(cfg,
                 print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
 
                 torch.cuda.empty_cache()
+
+        if save_latest_checkpoint and _is_main_process(cfg):
+            latest_path = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_latest.pth')
+            save_training_checkpoint(
+                latest_path,
+                cfg,
+                model,
+                center_criterion,
+                optimizer,
+                optimizer_center,
+                scheduler,
+                scaler,
+                epoch,
+                best_index,
+            )
+            logger.info('Saved latest training checkpoint to {}'.format(latest_path))
 
 
     writer.close()
