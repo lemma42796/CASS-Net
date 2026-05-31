@@ -82,8 +82,6 @@ STAGES = {
          'Baseline + HSS + SQT + NGA'),
         ('baseline_hss_sqt_nga_cagf', 'configs/RGBNT201/sweeps/incremental_hss_sqt_nga_cagf.yml',
          'Baseline + HSS + SQT + NGA + CA-GF'),
-        ('full_cass', 'configs/RGBNT201/sweeps/incremental_full_cass.yml',
-         'Full CASS-Net: quality + part + stabilized NGA'),
     ],
     'topk': [
         ('topk_32', 'configs/RGBNT201/sweeps/topk_32.yml', 'CASS_TOPK 32'),
