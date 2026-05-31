@@ -360,6 +360,14 @@ class HTLReID(nn.Module):
     def refresh_nga_memory(self, train_loader, device='cuda', logger=None, epoch=None):
         if (not self.use_cass_memory) or train_loader is None:
             return
+        nga = getattr(getattr(self, 'CASS', None), 'nga', None)
+        warmup_epochs = int(getattr(nga, 'memory_warmup_epochs', 0)) if nga is not None else 0
+        if epoch is not None and int(epoch) <= warmup_epochs:
+            if nga is not None:
+                nga.memory_ready = False
+            if logger is not None:
+                logger.info('Skipped CASS NGA memory refresh during warmup')
+            return
         was_training = self.training
         self.eval()
         memory_chunks = []

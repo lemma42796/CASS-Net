@@ -235,12 +235,16 @@ class R1_mAP():
 
 
 class R1_mAP_eval():
-    def __init__(self, num_query, max_rank=20, feat_norm=True, reranking=False):
+    def __init__(self, num_query, max_rank=20, feat_norm=True, reranking=False,
+                 rerank_k1=50, rerank_k2=20, rerank_lambda=0.2):
         super(R1_mAP_eval, self).__init__()
         self.num_query = num_query
         self.max_rank = max_rank
         self.feat_norm = feat_norm
         self.reranking = reranking
+        self.rerank_k1 = int(rerank_k1)
+        self.rerank_k2 = int(rerank_k2)
+        self.rerank_lambda = float(rerank_lambda)
 
     def reset(self):
         self.feats = []
@@ -268,12 +272,16 @@ class R1_mAP_eval():
 
         g_camids = np.asarray(self.camids[self.num_query:])
         if self.reranking:
-            print('=> Enter reranking')
-            # distmat = re_ranking(qf, gf, k1=20, k2=6, lambda_value=0.3)
-            distmat = re_ranking(qf, gf, k1=50, k2=15, lambda_value=0.3)
+            print('=> Enter reranking k1={} k2={} lambda={}'.format(
+                self.rerank_k1, self.rerank_k2, self.rerank_lambda))
+            distmat = re_ranking(
+                qf, gf,
+                k1=self.rerank_k1,
+                k2=self.rerank_k2,
+                lambda_value=self.rerank_lambda,
+            )
         else:
             print('=> Computing DistMat with euclidean_distance')
             distmat = euclidean_distance(qf, gf)
         cmc, mAP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids)
         return cmc, mAP, distmat, self.pids, self.camids, qf, gf
-

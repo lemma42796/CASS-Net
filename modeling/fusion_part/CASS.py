@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +15,14 @@ def _largest_divisor_at_most(value, limit):
         if value % candidate == 0:
             return candidate
     return 1
+
+
+def _disable_cuda_autocast(x):
+    if x.is_cuda:
+        if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+            return torch.amp.autocast('cuda', enabled=False)
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
 
 
 class TokenWhitening2d(nn.Module):
@@ -109,12 +119,13 @@ class HypergraphConv2d(nn.Module):
 
         metric = F.adaptive_avg_pool2d(x, output_size=(1, 1))
         metric = self.metric_conv(metric).float().view(b, self.filters)
-        metric = torch.diag_embed(metric)
 
         assign = self.assign_conv(x).float().permute(0, 2, 3, 1).contiguous()
         assign = assign.view(b, self.vertices, self.edges)
 
-        incidence = torch.matmul(phi, torch.matmul(metric, torch.matmul(phi.transpose(1, 2), assign))).abs()
+        assign_projected = torch.matmul(phi.transpose(1, 2), assign)
+        assign_projected = metric.unsqueeze(-1) * assign_projected
+        incidence = torch.matmul(phi, assign_projected).abs()
         incidence = torch.nan_to_num(incidence, nan=0.0, posinf=0.0, neginf=0.0)
         if self.theta > 0.0:
             threshold = self.theta * incidence.mean(dim=(1, 2), keepdim=True)
@@ -124,11 +135,12 @@ class HypergraphConv2d(nn.Module):
         incidence_norm = node_degree.clamp_min(1e-6).pow(-0.5).unsqueeze(-1) * incidence
         incidence_norm = torch.nan_to_num(incidence_norm, nan=0.0, posinf=0.0, neginf=0.0)
         edge_degree = incidence.sum(dim=1)
-        edge_degree = torch.diag_embed(edge_degree.clamp_min(1e-6).pow(-1.0))
+        edge_weight = edge_degree.clamp_min(1e-6).pow(-1.0)
 
         features = x_float.permute(0, 2, 3, 1).contiguous().view(b, self.vertices, self.dim)
-        propagated = torch.matmul(incidence_norm, torch.matmul(edge_degree, torch.matmul(
-            incidence_norm.transpose(1, 2), features)))
+        propagated = torch.matmul(incidence_norm.transpose(1, 2), features)
+        propagated = edge_weight.unsqueeze(-1) * propagated
+        propagated = torch.matmul(incidence_norm, propagated)
         propagated = torch.nan_to_num(propagated, nan=0.0, posinf=0.0, neginf=0.0)
         out = torch.matmul(features - propagated, self.weight.float())
         if self.bias is not None:
@@ -136,6 +148,27 @@ class HypergraphConv2d(nn.Module):
         out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         out = out.permute(0, 2, 1).contiguous().view(b, self.dim, self.feat_h, self.feat_w)
         return out.to(orig_dtype)
+
+
+class TokenResidualAdapter(nn.Module):
+    def __init__(self, dim, hidden_dim=0, use_norm=True):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim) if use_norm else nn.Identity()
+        hidden_dim = int(hidden_dim)
+        if hidden_dim > 0:
+            self.proj = nn.Sequential(
+                nn.Linear(dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, dim),
+            )
+        else:
+            self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        tokens = x.flatten(2).transpose(1, 2).contiguous()
+        tokens = self.proj(self.norm(tokens))
+        return tokens.transpose(1, 2).contiguous().view(b, c, h, w)
 
 
 class HighOrderStructureSynergy(nn.Module):
@@ -162,6 +195,27 @@ class HighOrderStructureSynergy(nn.Module):
             filters=cfg.MODEL.CASS_HSS_FILTERS,
             theta=cfg.MODEL.CASS_HSS_THETA,
         )
+        self.use_residual_adapter = bool(cfg.MODEL.CASS_HSS_RESIDUAL_ADAPTER)
+        if self.use_residual_adapter:
+            self.residual_adapter = TokenResidualAdapter(
+                dim,
+                cfg.MODEL.CASS_HSS_ADAPTER_DIM,
+                bool(cfg.MODEL.CASS_HSS_ADAPTER_NORM),
+            )
+        else:
+            self.residual_adapter = nn.Identity()
+        gate_init = float(cfg.MODEL.CASS_HSS_GATE_INIT)
+        self.residual_gate = nn.Parameter(torch.full((dim,), gate_init))
+        self.gate_floor = float(cfg.MODEL.CASS_HSS_GATE_FLOOR)
+        self.gate_floor_warmup_epochs = int(cfg.MODEL.CASS_HSS_GATE_FLOOR_WARMUP_EPOCHS)
+        self.score_mix = float(cfg.MODEL.CASS_HSS_SCORE_MIX)
+        self.score_source = str(cfg.MODEL.CASS_HSS_SCORE_SOURCE).lower()
+        self.score_detach = bool(cfg.MODEL.CASS_HSS_SCORE_DETACH)
+        if not 0.0 <= self.score_mix <= 1.0:
+            raise ValueError('CASS_HSS_SCORE_MIX must be in [0, 1], got {}'.format(self.score_mix))
+        if self.score_source not in ('residual', 'graph'):
+            raise ValueError("CASS_HSS_SCORE_SOURCE must be 'residual' or 'graph', got {}".format(
+                self.score_source))
         self.norm = nn.LayerNorm(dim)
 
     def current_graph_weight(self, epoch=None):
@@ -169,6 +223,43 @@ class HighOrderStructureSynergy(nn.Module):
             return self.graph_weight
         scale = min(1.0, max(0.0, float(epoch)) / float(self.graph_warmup_epochs))
         return self.graph_weight * scale
+
+    def current_gate_floor(self, epoch=None):
+        if self.gate_floor_warmup_epochs <= 0 or epoch is None:
+            return self.gate_floor
+        scale = min(1.0, max(0.0, float(epoch)) / float(self.gate_floor_warmup_epochs))
+        return self.gate_floor * scale
+
+    def effective_residual_gate(self, epoch=None):
+        return self.residual_gate.float() + self.current_gate_floor(epoch)
+
+    def current_residual_gate(self, epoch=None):
+        gate = self.effective_residual_gate(epoch).detach().float()
+        return gate.mean().item(), gate.abs().mean().item()
+
+    @staticmethod
+    def _minmax_token_score(score, eps=1e-8):
+        score = score.float()
+        lo = score.min(dim=1, keepdim=True).values
+        hi = score.max(dim=1, keepdim=True).values
+        return (score - lo) / (hi - lo).clamp_min(eps)
+
+    def _structure_score(self, graph_out, graph_residual):
+        source = graph_out if self.score_source == 'graph' else graph_residual
+        if self.score_detach:
+            source = source.detach()
+        tokens = source.float().flatten(2).transpose(1, 2).contiguous()
+        return self._minmax_token_score(tokens.norm(dim=-1))
+
+    def _self_score(self, enhanced, cls_token, graph_out, graph_residual):
+        n = enhanced.size(1)
+        cls_score = F.cosine_similarity(
+            enhanced, cls_token.float().expand(-1, n, -1), dim=-1)
+        if self.score_mix <= 0.0:
+            return cls_score
+        cls_score = self._minmax_token_score(cls_score)
+        structure_score = self._structure_score(graph_out, graph_residual)
+        return (1.0 - self.score_mix) * cls_score + self.score_mix * structure_score
 
     def forward(self, feat, epoch=None):
         cls_token = feat[:, :1, :]
@@ -179,13 +270,18 @@ class HighOrderStructureSynergy(nn.Module):
             raise ValueError('expected {} patch tokens, got {}'.format(expected, n))
 
         x = patches.transpose(1, 2).contiguous().view(b, c, self.feat_h, self.feat_w)
-        graph_input = self.whitening(x) if self.use_whitening else x
-        graph_out = self.hypergraph(graph_input)
-        enhanced = x + self.current_graph_weight(epoch) * graph_out
-        enhanced = enhanced.view(b, c, n).transpose(1, 2).contiguous()
-        enhanced = self.norm(enhanced)
-        out = torch.cat([cls_token, enhanced], dim=1)
-        score_self = F.cosine_similarity(enhanced, cls_token.expand(-1, n, -1), dim=-1)
+        orig_dtype = x.dtype
+        with _disable_cuda_autocast(x):
+            x_float = x.float()
+            graph_input = self.whitening(x_float) if self.use_whitening else x_float
+            graph_out = self.hypergraph(graph_input)
+            graph_residual = self.residual_adapter(graph_out)
+            gate = self.effective_residual_gate(epoch).view(1, c, 1, 1).to(device=x.device)
+            enhanced = x_float + self.current_graph_weight(epoch) * gate * graph_residual
+            enhanced = enhanced.view(b, c, n).transpose(1, 2).contiguous()
+            enhanced = self.norm(enhanced)
+            score_self = self._self_score(enhanced, cls_token, graph_out, graph_residual)
+        out = torch.cat([cls_token, enhanced.to(dtype=orig_dtype)], dim=1)
         return out, score_self
 
 

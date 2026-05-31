@@ -12,6 +12,11 @@ from .center_loss import CenterLoss
 def make_loss(cfg, num_classes):  # modified by gu
     sampler = cfg.DATALOADER.SAMPLER
     feat_dim = 2048
+    if str(cfg.MODEL.IF_WITH_CENTER).lower() not in ('no', 'false', '0', 'off'):
+        raise NotImplementedError(
+            'Center loss is not wired for the current multi-branch CASS feature dimensions. '
+            'Keep MODEL.IF_WITH_CENTER no, or implement branch-specific center dimensions first.'
+        )
     center_criterion = CenterLoss(num_classes=num_classes, feat_dim=feat_dim, use_gpu=False)  # center loss
     if 'triplet' in cfg.MODEL.METRIC_LOSS_TYPE:
         if cfg.MODEL.NO_MARGIN:

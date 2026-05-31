@@ -23,6 +23,76 @@ def _is_main_process(cfg):
     return dist.is_available() and dist.is_initialized() and dist.get_rank() == 0
 
 
+def _amp_dtype_from_cfg(value):
+    name = str(value).strip().lower()
+    if name in ('bf16', 'bfloat16'):
+        return torch.bfloat16, 'bf16'
+    if name in ('fp16', 'float16', 'half'):
+        return torch.float16, 'fp16'
+    if name in ('fp32', 'float32', 'none', 'off', 'false', '0'):
+        return None, 'fp32'
+    raise ValueError(
+        "Unsupported SOLVER.AMP_DTYPE '{}'. Use one of: bf16, fp16, fp32.".format(value))
+
+
+def _resolve_amp_settings(cfg, device):
+    amp_requested = bool(getattr(cfg.SOLVER, 'AMP', True))
+    if not amp_requested:
+        return False, None, 'off', False
+    amp_dtype, amp_dtype_name = _amp_dtype_from_cfg(getattr(cfg.SOLVER, 'AMP_DTYPE', 'bf16'))
+    amp_enabled = amp_requested and amp_dtype is not None
+    if amp_enabled and amp_dtype == torch.bfloat16 and str(device).startswith('cuda'):
+        bf16_supported = getattr(torch.cuda, 'is_bf16_supported', lambda: False)()
+        if not bf16_supported:
+            raise RuntimeError(
+                'SOLVER.AMP_DTYPE=bf16 was requested, but this CUDA device does not report bf16 support. '
+                'Use SOLVER.AMP_DTYPE fp16 or SOLVER.AMP False on this machine.')
+    scaler_enabled = amp_enabled and amp_dtype == torch.float16
+    return amp_enabled, amp_dtype, amp_dtype_name, scaler_enabled
+
+
+def _cuda_autocast(enabled, dtype):
+    if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+        if enabled:
+            return torch.amp.autocast('cuda', enabled=True, dtype=dtype)
+        return torch.amp.autocast('cuda', enabled=False)
+    if enabled:
+        return amp.autocast(enabled=True, dtype=dtype)
+    return amp.autocast(enabled=False)
+
+
+def _cuda_grad_scaler(enabled):
+    if hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
+        try:
+            return torch.amp.GradScaler('cuda', enabled=enabled)
+        except TypeError:
+            pass
+    return amp.GradScaler(enabled=enabled)
+
+
+def _branch_loss_weights(cfg, num_pairs):
+    if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() != 'CASS':
+        return [1.0] * num_pairs
+
+    fused_weight = float(getattr(cfg.MODEL, 'CASS_FUSED_LOSS_WEIGHT', 1.0))
+    modal_weight = float(getattr(cfg.MODEL, 'CASS_MODAL_LOSS_WEIGHT', 1.0))
+    part_weight = float(getattr(cfg.MODEL, 'CASS_PART_LOSS_WEIGHT', 1.0))
+    if num_pairs <= 0:
+        return []
+
+    weights = [fused_weight]
+    if bool(getattr(cfg.MODEL, 'AL', 0)):
+        if num_pairs > 1:
+            weights.append(modal_weight)
+        weights.extend([part_weight] * max(num_pairs - len(weights), 0))
+        return weights
+
+    modal_count = min(3, max(num_pairs - 1, 0))
+    weights.extend([modal_weight] * modal_count)
+    weights.extend([part_weight] * max(num_pairs - len(weights), 0))
+    return weights
+
+
 def normalize(x, axis=-1):
     """Normalizing to unit length along the specified dimension.
     Args:
@@ -72,15 +142,25 @@ def do_train(cfg,
             max_rank=50,
             feat_norm=cfg.TEST.FEAT_NORM,
             reranking=_cfg_enabled(cfg.TEST.RE_RANKING),
+            rerank_k1=cfg.TEST.RERANK_K1,
+            rerank_k2=cfg.TEST.RERANK_K2,
+            rerank_lambda=cfg.TEST.RERANK_LAMBDA,
         )
     evaluator_m.reset()
 
 
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
-    amp_enabled = bool(getattr(cfg.SOLVER, 'AMP', True))
-    logger.info('AMP enabled: {}'.format(amp_enabled))
-    scaler = amp.GradScaler(enabled=amp_enabled)
+    amp_enabled, amp_dtype, amp_dtype_name, scaler_enabled = _resolve_amp_settings(cfg, device)
+    logger.info('AMP enabled: {} dtype: {} scaler: {}'.format(
+        amp_enabled, amp_dtype_name, scaler_enabled))
+    if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS':
+        logger.info('CASS branch loss weights: fused {:.3f}, modal {:.3f}, part {:.3f}'.format(
+            float(cfg.MODEL.CASS_FUSED_LOSS_WEIGHT),
+            float(cfg.MODEL.CASS_MODAL_LOSS_WEIGHT),
+            float(cfg.MODEL.CASS_PART_LOSS_WEIGHT),
+        ))
+    scaler = _cuda_grad_scaler(enabled=scaler_enabled)
 
     best_index = {'mAP': 0, "Rank-1": 0, 'Rank-5': 0, 'Rank-10': 0}
     start_epoch = 1
@@ -116,6 +196,17 @@ def do_train(cfg,
         if hss is not None and hasattr(hss, 'current_graph_weight'):
             logger.info('CASS HSS graph weight: {:.4f} / {:.4f}'.format(
                 hss.current_graph_weight(epoch), hss.graph_weight))
+            if hasattr(hss, 'current_residual_gate'):
+                gate_mean, gate_abs = hss.current_residual_gate(epoch)
+                if hasattr(hss, 'current_gate_floor'):
+                    logger.info('CASS HSS residual gate: mean {:.4f}, abs-mean {:.4f}, floor {:.4f}'.format(
+                        gate_mean, gate_abs, hss.current_gate_floor(epoch)))
+                else:
+                    logger.info('CASS HSS residual gate: mean {:.4f}, abs-mean {:.4f}'.format(
+                        gate_mean, gate_abs))
+            if hasattr(hss, 'score_mix') and hss.score_mix > 0.0:
+                logger.info('CASS HSS score mix: {:.4f}, source {}, detach {}'.format(
+                    hss.score_mix, hss.score_source, hss.score_detach))
         refresh_period = max(1, int(getattr(cfg.MODEL, 'CASS_NGA_REFRESH_PERIOD', 1)))
         if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS' and (epoch - 1) % refresh_period == 0:
             model_for_memory.refresh_nga_memory(
@@ -130,20 +221,17 @@ def do_train(cfg,
             target = vid.to(device)
             target_cam = target_cam.to(device)
             target_view = target_view.to(device)
-            with amp.autocast(enabled=amp_enabled):
+            with _cuda_autocast(amp_enabled, amp_dtype):
                 output = model(img, label=target, cam_label=target_cam, view_label=target_view, img_path=imgpath,
                                writer=writer, epoch=epoch)
                 loss = 0
+                index = len(output) - 1 if len(output) % 2 == 1 else len(output)
+                branch_weights = _branch_loss_weights(cfg, index // 2)
+                for pair_idx, i in enumerate(range(0, index, 2)):
+                    loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
+                    loss = loss + branch_weights[pair_idx] * loss_tmp
                 if len(output) % 2 == 1:
-                    index = len(output) - 1
-                    for i in range(0, index, 2):
-                        loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
-                        loss = loss + loss_tmp
                     loss = loss + output[-1]
-                else:
-                    for i in range(0, len(output), 2):
-                        loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
-                        loss = loss + loss_tmp
             writer.add_scalar('Loss', loss.item(), epoch)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -295,6 +383,8 @@ def do_inference(cfg,
     device = "cuda"
     logger = logging.getLogger("HTL-ReID.test")
     logger.info("Enter inferencing")
+    if not _is_main_process(cfg):
+        return None
 
     if cfg.DATASETS.NAMES == "MSVR310":
         evaluator_m = R1_mAP(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
@@ -304,46 +394,39 @@ def do_inference(cfg,
             max_rank=50,
             feat_norm=cfg.TEST.FEAT_NORM,
             reranking=_cfg_enabled(cfg.TEST.RE_RANKING),
+            rerank_k1=cfg.TEST.RERANK_K1,
+            rerank_k2=cfg.TEST.RERANK_K2,
+            rerank_lambda=cfg.TEST.RERANK_LAMBDA,
         )
     evaluator_m.reset()
 
+    model.eval()
+    print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
+    print('!!!Mutil-Modal Testing!!!')
+    with torch.inference_mode():
+        for n_iter, (img, vid, camid, camids, target_view, img_paths) in enumerate(val_loader):
+            img = {'RGB': img['RGB'].to(device),
+                   'NI': img['NI'].to(device),
+                   'TI': img['TI'].to(device)}
+            camids = camids.to(device)
+            target_view = target_view.to(device)
+            feat = model(
+                img, cam_label=camids, view_label=target_view,
+                mode=1, img_path=img_paths)
+            if cfg.DATASETS.NAMES == "MSVR310":
+                evaluator_m.update((feat, vid, camid, target_view, img_paths))
+            else:
+                evaluator_m.update((feat, vid, camid))
 
-    if cfg.MODEL.DIST_TRAIN:
-        if dist.get_rank() == 0:
-            model.eval()
-            print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
-            print('!!!Mutil-Modal Testing!!!')
-            for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
-                with torch.no_grad():
-                    img = {'RGB': img['RGB'].to(device),
-                           'NI': img['NI'].to(device),
-                           'TI': img['TI'].to(device)}
-                    camids = camids.to(device)
-                    target_view = target_view.to(device)
-                    feat = model(img, cam_label=camids, view_label=target_view, mode=1, img_path=_)
-                    if cfg.DATASETS.NAMES == "MSVR310":
-                        evaluator_m.update((feat, vid, camid, target_view, _))
-                    else:
-                        evaluator_m.update((feat, vid, camid))
-
-
-            torch.cuda.empty_cache()
-
-    else:
-        model.eval()
-        print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
-        print('!!!Mutil-Modal Testing!!!')
-        for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
-            with torch.no_grad():
-                img = {'RGB': img['RGB'].to(device),
-                       'NI': img['NI'].to(device),
-                       'TI': img['TI'].to(device)}
-                camids = camids.to(device)
-                target_view = target_view.to(device)
-                feat = model(img, cam_label=camids, view_label=target_view, mode=1, img_path=_)
-                if cfg.DATASETS.NAMES == "MSVR310":
-                    evaluator_m.update((feat, vid, camid, target_view, _))
-                else:
-                    evaluator_m.update((feat, vid, camid))
-
-        torch.cuda.empty_cache()
+    cmc, mAP, _, _, _, _, _ = evaluator_m.compute(cfg)
+    logger.info("Inference Results")
+    logger.info("mAP: {:.2%}".format(float(mAP)))
+    results = {'mAP': float(mAP)}
+    for r in [1, 5, 10]:
+        if len(cmc) >= r:
+            value = float(cmc[r - 1])
+            logger.info("CMC curve, Rank-{:<3}:{:.2%}".format(r, value))
+            results['Rank-{}'.format(r)] = value
+    print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
+    torch.cuda.empty_cache()
+    return results
