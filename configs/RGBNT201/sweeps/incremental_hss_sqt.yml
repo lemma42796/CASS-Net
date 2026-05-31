@@ -1,0 +1,6 @@
+# Incremental ablation A2: Baseline + HSS + SQT.
+MODEL:
+  CASS_ABLATION_STAGE: 'hss_sqt'
+  CASS_QUALITY_AWARE: 0
+  CASS_PART_BRANCH: 0
+  CASS_NGA_MEMORY: 0

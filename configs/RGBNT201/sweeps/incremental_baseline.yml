@@ -1,0 +1,6 @@
+# Incremental ablation A0: shared ViT + simple token-summary fusion.
+MODEL:
+  CASS_ABLATION_STAGE: 'baseline'
+  CASS_QUALITY_AWARE: 0
+  CASS_PART_BRANCH: 0
+  CASS_NGA_MEMORY: 0

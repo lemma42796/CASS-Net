@@ -7,6 +7,34 @@ import torch.nn.functional as F
 
 MODALITY_ORDER = ('RGB', 'NIR', 'TIR')
 PAIR_ORDER = ((0, 1), (0, 2), (1, 2))
+CASS_ABLATION_STAGES = (
+    'baseline',
+    'hss',
+    'hss_sqt',
+    'hss_sqt_nga',
+    'hss_sqt_nga_cagf',
+    'full',
+)
+CASS_STAGE_RANK = {name: idx for idx, name in enumerate(CASS_ABLATION_STAGES)}
+
+
+def _canonical_stage(stage):
+    name = str(stage).strip().lower()
+    aliases = {
+        'none': 'baseline',
+        'base': 'baseline',
+        'hss+sqt': 'hss_sqt',
+        'hss+sqt+nga': 'hss_sqt_nga',
+        'hss+sqt+nga+cagf': 'hss_sqt_nga_cagf',
+        'hss_sqt_nga_ca_gf': 'hss_sqt_nga_cagf',
+        'core': 'hss_sqt_nga_cagf',
+    }
+    name = aliases.get(name, name)
+    if name not in CASS_STAGE_RANK:
+        raise ValueError(
+            'Unsupported CASS_ABLATION_STAGE "{}". Use one of: {}'.format(
+                stage, ', '.join(CASS_ABLATION_STAGES)))
+    return name
 
 
 def _largest_divisor_at_most(value, limit):
@@ -641,6 +669,8 @@ class CASSModule(nn.Module):
         self.dim = dim
         self.feat_h = feat_h
         self.feat_w = feat_w
+        self.stage = _canonical_stage(getattr(cfg.MODEL, 'CASS_ABLATION_STAGE', 'full'))
+        self.stage_rank = CASS_STAGE_RANK[self.stage]
         heads = int(cfg.MODEL.CASS_NUM_HEADS)
         self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg)
         self.sqt = SynergyQueryToken(dim, num_heads=heads)
@@ -648,15 +678,100 @@ class CASSModule(nn.Module):
         self.selector = DynamicCollaborativeSelector(cfg)
         self.fusion = ContextAwareGatedFusion(dim, num_heads=heads)
 
+    @property
+    def uses_hss(self):
+        return self.stage_rank >= CASS_STAGE_RANK['hss']
+
+    @property
+    def uses_sqt(self):
+        return self.stage_rank >= CASS_STAGE_RANK['hss_sqt']
+
+    @property
+    def uses_nga(self):
+        return self.stage_rank >= CASS_STAGE_RANK['hss_sqt_nga']
+
+    @property
+    def uses_cagf(self):
+        return self.stage_rank >= CASS_STAGE_RANK['hss_sqt_nga_cagf']
+
+    @property
+    def uses_full_design(self):
+        return self.stage == 'full'
+
     def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
+        if not self.uses_nga:
+            self.nga.memory_ready = False
+            return
         self.nga.set_memory(features, keys, modality_names, labels=labels, epoch=epoch)
+
+    @staticmethod
+    def _all_token_masks(features):
+        masks = {}
+        for name, feat in features.items():
+            masks[name] = torch.ones(
+                feat.size(0), feat.size(1) - 1,
+                device=feat.device, dtype=torch.bool)
+        return masks
+
+    @staticmethod
+    def _token_summary(feat):
+        patches = feat[:, 1:, :]
+        return feat[:, 0, :] + patches.mean(dim=1)
+
+    def _summary_dict(self, token_features):
+        return {
+            name: self._token_summary(feat)
+            for name, feat in token_features.items()
+        }
+
+    @staticmethod
+    def _descriptor_from_fused(fused, quality_scores=None):
+        template = next(iter(fused.values()))
+        descriptor_parts = []
+        for name in MODALITY_ORDER:
+            if name in fused:
+                part = fused[name]
+                if quality_scores is not None:
+                    idx = MODALITY_ORDER.index(name)
+                    part = part * quality_scores[:, idx:idx + 1]
+                descriptor_parts.append(part)
+            else:
+                descriptor_parts.append(torch.zeros_like(template))
+        return torch.cat(descriptor_parts, dim=-1)
+
+    def _base_keep_ratio(self, batch_size, num_tokens, device, dtype):
+        if not self.selector.use_dynamic_topk:
+            return None
+        min_k, max_k = self.selector._topk_bounds(num_tokens)
+        if max_k == min_k:
+            return None
+        base = max(1, min(self.selector.topk, num_tokens))
+        ratio = (float(base) - float(min_k)) / float(max_k - min_k)
+        ratio = min(max(ratio, 0.0), 1.0)
+        return torch.full(
+            (batch_size, len(MODALITY_ORDER)),
+            ratio, device=device, dtype=dtype)
 
     def forward(self, features, img_path=None, quality_scores=None, epoch=None):
         modality_names = list(features.keys())
-        enhanced = {}
-        self_scores = {}
-        for name in modality_names:
-            enhanced[name], self_scores[name] = self.hss(features[name], epoch=epoch)
+        if not self.uses_full_design:
+            quality_scores = None
+
+        if self.uses_hss:
+            enhanced = {}
+            self_scores = {}
+            for name in modality_names:
+                enhanced[name], self_scores[name] = self.hss(features[name], epoch=epoch)
+        else:
+            enhanced = dict(features)
+            self_scores = {}
+
+        if not self.uses_sqt:
+            selected = enhanced
+            masks = self._all_token_masks(selected)
+            fused = self._summary_dict(selected)
+            descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
+            return selected, masks, fused, descriptor
 
         enhanced_list = [enhanced[name] for name in modality_names]
         structure_scores, _ = self.sqt(enhanced_list)
@@ -664,8 +779,18 @@ class CASSModule(nn.Module):
         if quality_scores is not None:
             template = cls_list[0]
             quality_scores = quality_scores.to(device=template.device, dtype=template.dtype)
-        alpha_dyn, keep_ratio, gate_bias, _ = self.nga(
-            cls_list, modality_names, keys=img_path, quality_scores=quality_scores)
+        if self.uses_nga:
+            alpha_dyn, keep_ratio, gate_bias, _ = self.nga(
+                cls_list, modality_names, keys=img_path, quality_scores=quality_scores)
+        else:
+            template = cls_list[0]
+            alpha_dyn = torch.ones(
+                template.size(0), len(MODALITY_ORDER),
+                device=template.device, dtype=template.dtype)
+            keep_ratio = self._base_keep_ratio(
+                template.size(0), enhanced_list[0].size(1) - 1,
+                template.device, template.dtype)
+            gate_bias = torch.zeros_like(template)
 
         selected = {}
         masks = {}
@@ -678,17 +803,9 @@ class CASSModule(nn.Module):
             selected[name], masks[name] = self.selector(
                 enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio, quality)
 
-        fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
-        template = next(iter(fused.values()))
-        descriptor_parts = []
-        for name in MODALITY_ORDER:
-            if name in fused:
-                part = fused[name]
-                if quality_scores is not None:
-                    idx = MODALITY_ORDER.index(name)
-                    part = part * quality_scores[:, idx:idx + 1]
-                descriptor_parts.append(part)
-            else:
-                descriptor_parts.append(torch.zeros_like(template))
-        descriptor = torch.cat(descriptor_parts, dim=-1)
+        if self.uses_cagf:
+            fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
+        else:
+            fused = self._summary_dict(selected)
+        descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
         return selected, masks, fused, descriptor

@@ -165,6 +165,7 @@ class HTLReID(nn.Module):
         self.num_patches = self.feat_h * self.feat_w
         self.method = cfg.MODEL.METHOD.upper()
         self.use_cass = self.method == 'CASS'
+        self.cass_stage = str(getattr(cfg.MODEL, 'CASS_ABLATION_STAGE', 'full')).strip().lower()
         if self.use_cass:
             self.CASS = CASSModule(dim=self.BACKBONE.token_dim, cfg=cfg,
                                    feat_h=self.feat_h, feat_w=self.feat_w)
@@ -175,10 +176,12 @@ class HTLReID(nn.Module):
         self.use_agf = bool(cfg.MODEL.AGF) and not self.use_cass
         self.use_ocfr = bool(cfg.MODEL.OCFR) and not self.use_cass
         self.use_quality = bool(cfg.MODEL.QUALITY_AWARE) and not self.use_cass
-        self.use_cass_quality = self.use_cass and bool(cfg.MODEL.CASS_QUALITY_AWARE)
+        self.use_cass_quality = (
+            self.use_cass and self.cass_stage == 'full' and bool(cfg.MODEL.CASS_QUALITY_AWARE))
         self.use_adapter = bool(cfg.MODEL.MODALITY_ADAPTER) and not self.use_cass
         self.use_part = bool(cfg.MODEL.PART_BRANCH) and not self.use_cass
-        self.use_cass_part = self.use_cass and bool(cfg.MODEL.CASS_PART_BRANCH)
+        self.use_cass_part = (
+            self.use_cass and self.cass_stage == 'full' and bool(cfg.MODEL.CASS_PART_BRANCH))
         self.part_num = int(cfg.MODEL.CASS_PART_NUM if self.use_cass else cfg.MODEL.PART_NUM)
         self.modality_drop_prob = 0.0 if self.use_cass else float(cfg.INPUT.MODALITY_DROP_PROB)
         self.align_loss_weight = float(cfg.MODEL.ALIGN_LOSS_WEIGHT)
@@ -359,6 +362,14 @@ class HTLReID(nn.Module):
 
     def refresh_nga_memory(self, train_loader, device='cuda', logger=None, epoch=None):
         if (not self.use_cass_memory) or train_loader is None:
+            return
+        cass = getattr(self, 'CASS', None)
+        if cass is not None and hasattr(cass, 'uses_nga') and not cass.uses_nga:
+            if getattr(cass.nga, 'memory_ready', False):
+                cass.nga.memory_ready = False
+            if logger is not None:
+                logger.info('Skipped CASS NGA memory refresh for ablation stage {}'.format(
+                    getattr(cass, 'stage', 'unknown')))
             return
         nga = getattr(getattr(self, 'CASS', None), 'nga', None)
         warmup_epochs = int(getattr(nga, 'memory_warmup_epochs', 0)) if nga is not None else 0

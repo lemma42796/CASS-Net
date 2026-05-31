@@ -95,6 +95,9 @@ _C.MODEL.TOKEN_CONSISTENCY_WEIGHT = 0.0
 _C.MODEL.GATE_BALANCE_WEIGHT = 0.0
 
 # CASS-Net (chapter 4): HSS + SQT + NGA + CA-GF
+# Incremental ablation stage:
+# 'baseline' | 'hss' | 'hss_sqt' | 'hss_sqt_nga' | 'hss_sqt_nga_cagf' | 'full'
+_C.MODEL.CASS_ABLATION_STAGE = 'full'
 _C.MODEL.CASS_NUM_HEADS = 12
 _C.MODEL.CASS_TOPK = 64
 _C.MODEL.CASS_DYNAMIC_TOPK = 1
