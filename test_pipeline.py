@@ -333,7 +333,7 @@ def test_ablation_switches():
 
 
 def test_nga_memory_stabilization():
-    print('[8] NGA memory warmup+EMA+prototype')
+    print('[9] NGA memory warmup+EMA+prototype')
     cfg = _make_cfg(
         'configs/RGBNT201/default.yml',
         **{
@@ -364,6 +364,63 @@ def test_nga_memory_stabilization():
     print('     OK')
 
 
+def test_hss_graph_warmup():
+    print('[10] HSS graph residual warmup')
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_HSS_GRAPH_WEIGHT': 0.6,
+            'MODEL.CASS_HSS_GRAPH_WARMUP_EPOCHS': 3,
+        }
+    )
+    model = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).cpu()
+    hss = model.CASS.hss
+    expected = [
+        (None, 0.6),
+        (0, 0.0),
+        (1, 0.2),
+        (2, 0.4),
+        (3, 0.6),
+        (10, 0.6),
+    ]
+    for epoch, target in expected:
+        got = hss.current_graph_weight(epoch)
+        assert abs(got - target) < 1e-6, 'epoch {}: {} != {}'.format(epoch, got, target)
+
+    model.train()
+    x = _dummy_batch(cfg)
+    label = torch.randint(0, NUM_CLASSES, (BATCH,))
+    out = model(x, cam_label=None, label=label, epoch=1)
+    assert isinstance(out, tuple)
+    print('     OK')
+
+
+def test_resume_weight_loader():
+    print('[11] staged resume weight loader')
+    import tempfile
+    from utils.checkpoint import load_resume_weights
+
+    cfg = _make_cfg('configs/RGBNT201/default.yml')
+    torch.manual_seed(7)
+    source = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).cpu()
+    source_state = copy.deepcopy(source.state_dict())
+
+    target = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).cpu()
+    first_key = next(iter(source_state))
+    with torch.no_grad():
+        target.state_dict()[first_key].zero_()
+    assert not torch.allclose(target.state_dict()[first_key], source_state[first_key])
+
+    with tempfile.NamedTemporaryFile(suffix='.pth') as fh:
+        torch.save(source_state, fh.name)
+        cfg.MODEL.RESUME_PATH = fh.name
+        loaded = load_resume_weights(cfg, target)
+
+    assert loaded
+    assert torch.allclose(target.state_dict()[first_key], source_state[first_key])
+    print('     OK')
+
+
 def main():
     test_defaults_load()
     test_yml_configs_merge()
@@ -375,6 +432,8 @@ def main():
     test_local_pretrain_source_loader()
     test_ablation_switches()
     test_nga_memory_stabilization()
+    test_hss_graph_warmup()
+    test_resume_weight_loader()
     print('\n=== ALL PIPELINE TESTS PASSED ===')
 
 

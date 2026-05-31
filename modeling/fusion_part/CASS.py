@@ -146,6 +146,7 @@ class HighOrderStructureSynergy(nn.Module):
         self.feat_w = feat_w
         self.use_whitening = bool(cfg.MODEL.CASS_HSS_WHITEN)
         self.graph_weight = float(cfg.MODEL.CASS_HSS_GRAPH_WEIGHT)
+        self.graph_warmup_epochs = int(cfg.MODEL.CASS_HSS_GRAPH_WARMUP_EPOCHS)
         if self.use_whitening:
             self.whitening = WhiteningScaleShift(
                 dim,
@@ -163,7 +164,13 @@ class HighOrderStructureSynergy(nn.Module):
         )
         self.norm = nn.LayerNorm(dim)
 
-    def forward(self, feat):
+    def current_graph_weight(self, epoch=None):
+        if self.graph_warmup_epochs <= 0 or epoch is None:
+            return self.graph_weight
+        scale = min(1.0, max(0.0, float(epoch)) / float(self.graph_warmup_epochs))
+        return self.graph_weight * scale
+
+    def forward(self, feat, epoch=None):
         cls_token = feat[:, :1, :]
         patches = feat[:, 1:, :]
         b, n, c = patches.shape
@@ -174,7 +181,7 @@ class HighOrderStructureSynergy(nn.Module):
         x = patches.transpose(1, 2).contiguous().view(b, c, self.feat_h, self.feat_w)
         graph_input = self.whitening(x) if self.use_whitening else x
         graph_out = self.hypergraph(graph_input)
-        enhanced = x + self.graph_weight * graph_out
+        enhanced = x + self.current_graph_weight(epoch) * graph_out
         enhanced = enhanced.view(b, c, n).transpose(1, 2).contiguous()
         enhanced = self.norm(enhanced)
         out = torch.cat([cls_token, enhanced], dim=1)
@@ -548,12 +555,12 @@ class CASSModule(nn.Module):
     def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
         self.nga.set_memory(features, keys, modality_names, labels=labels, epoch=epoch)
 
-    def forward(self, features, img_path=None, quality_scores=None):
+    def forward(self, features, img_path=None, quality_scores=None, epoch=None):
         modality_names = list(features.keys())
         enhanced = {}
         self_scores = {}
         for name in modality_names:
-            enhanced[name], self_scores[name] = self.hss(features[name])
+            enhanced[name], self_scores[name] = self.hss(features[name], epoch=epoch)
 
         enhanced_list = [enhanced[name] for name in modality_names]
         structure_scores, _ = self.sqt(enhanced_list)

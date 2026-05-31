@@ -342,12 +342,12 @@ class HTLReID(nn.Module):
         return loss
 
     def _cass_forward_from_features(self, rgb_feat, nir_feat, tir_feat=None, img_path=None,
-                                    quality_scores=None):
+                                    quality_scores=None, epoch=None):
         features = {'RGB': rgb_feat, 'NIR': nir_feat}
         if tir_feat is not None:
             features['TIR'] = tir_feat
         selected, masks, fused, cls4t = self.CASS(
-            features, img_path=img_path, quality_scores=quality_scores)
+            features, img_path=img_path, quality_scores=quality_scores, epoch=epoch)
         rgb_cls = fused['RGB']
         nir_cls = fused['NIR']
         tir_cls = fused.get('TIR')
@@ -445,7 +445,7 @@ class HTLReID(nn.Module):
                 selected, masks, cls4t, RGB_cls4tri, NIR_cls4tri, TIR_cls4tri = \
                     self._cass_forward_from_features(
                         RGB_feat, NIR_feat, TIR_feat, img_path=img_path,
-                        quality_scores=quality_scores)
+                        quality_scores=quality_scores, epoch=epoch)
                 score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
                 loss_aux = self._auxiliary_losses(
                     selected['RGB'], selected['NIR'], selected['TIR'],
@@ -530,7 +530,7 @@ class HTLReID(nn.Module):
                     if self.use_cass_quality else None
                 _, _, cls4t, _, _, _ = self._cass_forward_from_features(
                     RGB_feat, NIR_feat, TIR_feat, img_path=img_path,
-                    quality_scores=quality_scores)
+                    quality_scores=quality_scores, epoch=epoch)
                 return cls4t
             quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], TIR_feat[:, 0, :]) \
                 if self.use_quality else None
@@ -576,7 +576,7 @@ class HTLReID(nn.Module):
                 selected, masks, cls4t, RGB_cls4tri, NIR_cls4tri, _ = \
                     self._cass_forward_from_features(
                         RGB_feat, NIR_feat, None, img_path=img_path,
-                        quality_scores=quality_scores)
+                        quality_scores=quality_scores, epoch=epoch)
                 score = self.FUSE_HEAD(self.FUSE_BN(cls4t))
                 TIR_selected = torch.zeros_like(selected['RGB'])
                 loss_aux = self._auxiliary_losses(
@@ -660,7 +660,7 @@ class HTLReID(nn.Module):
                     if self.use_cass_quality else None
                 _, _, cls4t, _, _, _ = self._cass_forward_from_features(
                     RGB_feat, NIR_feat, None, img_path=img_path,
-                    quality_scores=quality_scores)
+                    quality_scores=quality_scores, epoch=epoch)
                 return cls4t
             quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], None) \
                 if self.use_quality else None

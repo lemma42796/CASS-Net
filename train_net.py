@@ -5,6 +5,7 @@ from solver.make_optimizer import make_optimizer
 from solver.scheduler_factory import create_scheduler
 from layers.make_loss import make_loss
 from engine.processor import do_train
+from utils.checkpoint import load_resume_weights
 import random
 import torch
 import numpy as np
@@ -70,6 +71,7 @@ if __name__ == '__main__':
         cfg)
     print("data is ready")
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num)
+    load_resume_weights(cfg, model, logger)
 
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
 

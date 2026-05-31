@@ -82,6 +82,10 @@ def do_train(cfg,
         acc_meter.reset()
         scheduler.step(epoch)
         model_for_memory = model.module if hasattr(model, 'module') else model
+        hss = getattr(getattr(model_for_memory, 'CASS', None), 'hss', None)
+        if hss is not None and hasattr(hss, 'current_graph_weight'):
+            logger.info('CASS HSS graph weight: {:.4f} / {:.4f}'.format(
+                hss.current_graph_weight(epoch), hss.graph_weight))
         refresh_period = max(1, int(getattr(cfg.MODEL, 'CASS_NGA_REFRESH_PERIOD', 1)))
         if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS' and (epoch - 1) % refresh_period == 0:
             model_for_memory.refresh_nga_memory(
@@ -159,7 +163,9 @@ def do_train(cfg,
                                    'TI': img['TI'].to(device)}
                             camids = camids.to(device)
                             target_view = target_view.to(device)
-                            feat = model(img, cam_label=camids, view_label=target_view, mode=1, img_path=_)
+                            feat = model(
+                                img, cam_label=camids, view_label=target_view,
+                                mode=1, img_path=_, epoch=epoch)
                             if cfg.DATASETS.NAMES == "MSVR310":
                                 evaluator_m.update((feat, vid, camid, target_view, _))
                             else:
@@ -199,7 +205,9 @@ def do_train(cfg,
                                'TI': img['TI'].to(device)}
                         camids = camids.to(device)
                         target_view = target_view.to(device)
-                        feat = model(img, cam_label=camids, view_label=target_view, mode=1, img_path=_)
+                        feat = model(
+                            img, cam_label=camids, view_label=target_view,
+                            mode=1, img_path=_, epoch=epoch)
                         if cfg.DATASETS.NAMES == "MSVR310":
                             evaluator_m.update((feat, vid, camid, target_view, _))
                         else:

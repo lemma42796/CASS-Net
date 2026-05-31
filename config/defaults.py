@@ -18,6 +18,9 @@ _C.MODEL.MARGIN = 0
 # files, checkpoint directories, and timm://model_name sources, e.g.
 # timm://vit_base_patch16_224.augreg2_in21k_ft_in1k
 _C.MODEL.PRETRAIN_PATH_T = 'your_path_to_pretrained_model'
+# Optional full-model checkpoint used for staged CASS fine-tuning.
+# Load happens before optimizer construction, so optimizer/scheduler start fresh.
+_C.MODEL.RESUME_PATH = ''
 # Use ImageNet pretrained model to initialize backbone or use self trained model to initialize the whole model
 # Options: 'imagenet' or 'self'
 _C.MODEL.PRETRAIN_CHOICE = 'imagenet'
@@ -104,6 +107,7 @@ _C.MODEL.CASS_SOFT_RESIDUAL_WEIGHT = 0.05
 _C.MODEL.CASS_HSS_EDGES = 256
 _C.MODEL.CASS_HSS_FILTERS = 128
 _C.MODEL.CASS_HSS_GRAPH_WEIGHT = 1.0
+_C.MODEL.CASS_HSS_GRAPH_WARMUP_EPOCHS = 0
 _C.MODEL.CASS_HSS_THETA = 0.0
 _C.MODEL.CASS_HSS_WHITEN = 1
 _C.MODEL.CASS_WHITEN_GROUP_SIZE = 16
