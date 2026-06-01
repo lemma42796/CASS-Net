@@ -3,7 +3,7 @@ from config import cfg
 import argparse
 from data import make_dataloader
 from modeling import make_model
-from engine.processor import do_inference
+from engine.processor import do_inference, refresh_cass_nga_memory_for_test
 from utils.logger import setup_logger
 
 if __name__ == "__main__":
@@ -46,4 +46,6 @@ if __name__ == "__main__":
             "    python test_net.py --config_file <yml> TEST.WEIGHT /path/to/ckpt.pth"
         )
     model.load_param(cfg.TEST.WEIGHT)
+    refresh_cass_nga_memory_for_test(
+        cfg, model, train_loader_normal, device="cuda", logger=logger)
     do_inference(cfg, model, val_loader, num_query)

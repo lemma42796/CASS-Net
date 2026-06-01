@@ -299,6 +299,13 @@ _C.TEST.RE_RANKING = 'yes'
 _C.TEST.RERANK_K1 = 50
 _C.TEST.RERANK_K2 = 20
 _C.TEST.RERANK_LAMBDA = 0.2
+# Refresh CASS NGA train memory before standalone inference. 'auto' refreshes
+# only for CASS runs with MODEL.CASS_NGA_MEMORY enabled; use 'no' for legacy
+# debugging.
+_C.TEST.REFRESH_CASS_NGA_MEMORY = 'auto'
+# -1 means refresh memory in the fully enabled inference state. Set a positive
+# epoch only when reproducing a specific memory warmup/checkpoint context.
+_C.TEST.CASS_NGA_MEMORY_EPOCH = -1
 # Path to trained model
 _C.TEST.WEIGHT = ""
 # Which feature of BNNeck to be used for test, before or after BNNneck, options: 'before' or 'after'

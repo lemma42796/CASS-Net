@@ -30,6 +30,7 @@ Coverage:
  21. NGA residual keeps the additive SQT repair path active when selector is off
  22. CA-GF residual keeps the repaired A3 descriptor as the identity path
  23. CA-GF agreement mode suppresses conflicting cross-modal context
+ 24. Standalone test helper refreshes CASS NGA memory before inference
 
 Run:
     python3 test_pipeline.py
@@ -798,6 +799,51 @@ def test_cagf_agreement_rejects_conflicting_context():
         good_delta, bad_delta))
 
 
+def test_test_refresh_cass_nga_memory_helper():
+    print('[24] standalone test refreshes CASS NGA memory')
+    from engine.processor import refresh_cass_nga_memory_for_test
+
+    class DummyModel:
+        def __init__(self):
+            self.calls = []
+
+        def refresh_nga_memory(self, train_loader, device='cuda', logger=None, epoch=None):
+            self.calls.append((train_loader, device, epoch))
+
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_NGA_MEMORY': 1,
+            'TEST.REFRESH_CASS_NGA_MEMORY': 'auto',
+            'TEST.CASS_NGA_MEMORY_EPOCH': 17,
+        }
+    )
+    model = DummyModel()
+    loader = object()
+    called = refresh_cass_nga_memory_for_test(
+        cfg, model, loader, device=str(DEVICE), logger=None)
+    assert called
+    assert model.calls == [(loader, str(DEVICE), 17)]
+
+    cfg.TEST.CASS_NGA_MEMORY_EPOCH = -1
+    refresh_cass_nga_memory_for_test(cfg, model, loader, device=str(DEVICE), logger=None)
+    assert model.calls[-1] == (loader, str(DEVICE), None)
+
+    cfg.TEST.REFRESH_CASS_NGA_MEMORY = 'no'
+    called = refresh_cass_nga_memory_for_test(
+        cfg, model, loader, device=str(DEVICE), logger=None)
+    assert not called
+    assert len(model.calls) == 2
+
+    cfg.TEST.REFRESH_CASS_NGA_MEMORY = 'auto'
+    cfg.MODEL.CASS_NGA_MEMORY = 0
+    called = refresh_cass_nga_memory_for_test(
+        cfg, model, loader, device=str(DEVICE), logger=None)
+    assert not called
+    assert len(model.calls) == 2
+    print('     OK')
+
+
 def test_hypergraph_broadcast_matches_diag_math():
     print('[15] Hypergraph broadcast matches diagonal math')
     from modeling.fusion_part.CASS import HypergraphConv2d
@@ -1002,6 +1048,7 @@ def main():
     test_nga_residual_keeps_additive_path_active()
     test_cagf_residual_preserves_repaired_a3_identity()
     test_cagf_agreement_rejects_conflicting_context()
+    test_test_refresh_cass_nga_memory_helper()
     test_hypergraph_broadcast_matches_diag_math()
     test_resume_weight_loader()
     test_training_checkpoint_roundtrip()

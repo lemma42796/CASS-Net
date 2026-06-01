@@ -17,6 +17,57 @@ def _cfg_enabled(value):
     return bool(value)
 
 
+def _test_refresh_mode(value):
+    mode = str(value).strip().lower()
+    aliases = {
+        'true': 'yes',
+        '1': 'yes',
+        'on': 'yes',
+        'false': 'no',
+        '0': 'no',
+        'off': 'no',
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in ('auto', 'yes', 'no'):
+        raise ValueError(
+            "Unsupported TEST.REFRESH_CASS_NGA_MEMORY '{}'. Use auto, yes, or no.".format(value))
+    return mode
+
+
+def refresh_cass_nga_memory_for_test(cfg, model, train_loader_normal, device='cuda', logger=None):
+    mode = _test_refresh_mode(getattr(cfg.TEST, 'REFRESH_CASS_NGA_MEMORY', 'auto'))
+    if mode == 'no':
+        if logger is not None:
+            logger.info('Skipped CASS NGA memory refresh before inference: disabled by TEST.REFRESH_CASS_NGA_MEMORY')
+        return False
+
+    should_refresh = (
+        mode == 'yes' or (
+            getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS' and
+            _cfg_enabled(getattr(cfg.MODEL, 'CASS_NGA_MEMORY', 0))
+        )
+    )
+    if not should_refresh:
+        if logger is not None:
+            logger.info('Skipped CASS NGA memory refresh before inference: not a CASS NGA-memory run')
+        return False
+
+    model_for_memory = model.module if hasattr(model, 'module') else model
+    if not hasattr(model_for_memory, 'refresh_nga_memory'):
+        if logger is not None:
+            logger.warning('Skipped CASS NGA memory refresh before inference: model has no refresh_nga_memory method')
+        return False
+
+    epoch = int(getattr(cfg.TEST, 'CASS_NGA_MEMORY_EPOCH', -1))
+    refresh_epoch = None if epoch < 0 else epoch
+    if logger is not None:
+        epoch_msg = 'fully enabled inference state' if refresh_epoch is None else 'epoch {}'.format(refresh_epoch)
+        logger.info('Refreshing CASS NGA memory before inference ({})'.format(epoch_msg))
+    model_for_memory.refresh_nga_memory(
+        train_loader_normal, device=device, logger=logger, epoch=refresh_epoch)
+    return True
+
+
 def _is_main_process(cfg):
     if not cfg.MODEL.DIST_TRAIN:
         return True
