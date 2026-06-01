@@ -407,6 +407,7 @@ class NeighborhoodGuidedAdapter(nn.Module):
         self.gate_groups = _largest_divisor_at_most(dim, cfg.MODEL.CASS_NGA_GATE_GROUPS)
         self.use_modal_alpha = bool(cfg.MODEL.CASS_MODAL_ALPHA)
         self.use_dynamic_topk = bool(cfg.MODEL.CASS_DYNAMIC_TOPK)
+        self.use_query_anchor = bool(cfg.MODEL.CASS_NGA_QUERY_ANCHOR)
         self.memory_warmup_epochs = int(cfg.MODEL.CASS_NGA_WARMUP_EPOCHS)
         self.memory_ema_momentum = float(cfg.MODEL.CASS_NGA_EMA_MOMENTUM)
         self.use_prototype_memory = bool(cfg.MODEL.CASS_NGA_USE_PROTOTYPE)
@@ -438,6 +439,7 @@ class NeighborhoodGuidedAdapter(nn.Module):
         self.memory_neighbors = {}
         self.pid_to_proto_index = {}
         self.prototype_neighbors = {}
+        self.prototype_tensor = None
 
     def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
         if features.numel() == 0 or (
@@ -487,6 +489,7 @@ class NeighborhoodGuidedAdapter(nn.Module):
     def _build_prototype_neighbors(self, full, labels):
         self.pid_to_proto_index = {}
         self.prototype_neighbors = {}
+        self.prototype_tensor = None
         if (not self.use_prototype_memory) or labels is None:
             return
         label_tensor = torch.tensor([int(x) for x in labels], dtype=torch.long)
@@ -499,6 +502,7 @@ class NeighborhoodGuidedAdapter(nn.Module):
             prototypes[proto_idx] = full[mask].mean(dim=0)
             self.pid_to_proto_index[int(pid.item())] = proto_idx
         prototypes = F.normalize(prototypes, dim=-1)
+        self.prototype_tensor = prototypes
         k = min(self.knn, max(prototypes.size(0) - 1, 0))
         for idx, name in enumerate(MODALITY_ORDER):
             if k == 0:
@@ -512,20 +516,48 @@ class NeighborhoodGuidedAdapter(nn.Module):
     def _fallback_jaccard(self, cos_values):
         return [(cos.clamp(-1.0, 1.0) + 1.0) * 0.5 for cos in cos_values]
 
-    def _memory_jaccard(self, keys, device, dtype, batch_size):
+    def _infer_query_anchor(self, cls_by_index, source):
+        if source is None or source.numel() == 0:
+            return None
+        scores = None
+        with torch.no_grad():
+            for idx, query in cls_by_index.items():
+                if idx >= source.size(1):
+                    continue
+                query_cpu = F.normalize(query.detach().float(), dim=-1).cpu()
+                ref = source[:, idx, :].float()
+                sim = query_cpu @ ref.t()
+                scores = sim if scores is None else scores + sim
+        if scores is None:
+            return None
+        return scores.argmax(dim=1)
+
+    def _memory_jaccard(self, keys, cls_by_index, device, dtype, batch_size):
         if (not self.memory_ready) or keys is None:
             return None
         out = torch.zeros(batch_size, len(PAIR_ORDER), device=device, dtype=dtype)
+        proto_anchor = None
+        if (self.use_query_anchor and self.use_prototype_memory and
+                self.prototype_tensor is not None and self.prototype_neighbors):
+            proto_anchor = self._infer_query_anchor(cls_by_index, self.prototype_tensor)
+        sample_anchor = None
+        if self.use_query_anchor and self.memory_tensor is not None and self.memory_neighbors:
+            sample_anchor = self._infer_query_anchor(cls_by_index, self.memory_tensor)
+
         for b, key in enumerate(keys):
             idx = self.key_to_index.get(str(key))
             if idx is None:
-                continue
+                idx = int(sample_anchor[b].item()) if sample_anchor is not None else None
             pid = self.key_to_pid.get(str(key))
             proto_idx = self.pid_to_proto_index.get(pid)
+            if proto_idx is None and proto_anchor is not None:
+                proto_idx = int(proto_anchor[b].item())
             for p, (i, j) in enumerate(PAIR_ORDER):
                 if proto_idx is not None and self.prototype_neighbors:
                     a = self.prototype_neighbors[i][proto_idx]
                     b_set = self.prototype_neighbors[j][proto_idx]
+                elif idx is None:
+                    continue
                 else:
                     a = self.memory_neighbors[i][idx]
                     b_set = self.memory_neighbors[j][idx]
@@ -551,7 +583,7 @@ class NeighborhoodGuidedAdapter(nn.Module):
             else:
                 cos = torch.zeros(batch_size, device=device, dtype=dtype)
             cos_values.append(cos)
-        jaccard = self._memory_jaccard(keys, device, dtype, batch_size)
+        jaccard = self._memory_jaccard(keys, cls_by_index, device, dtype, batch_size)
         if jaccard is None:
             jaccard_values = self._fallback_jaccard(cos_values)
             jaccard = torch.stack(jaccard_values, dim=1)
@@ -738,12 +770,21 @@ class CASSModule(nn.Module):
         self.sqt_use_selector = bool(cfg.MODEL.CASS_SQT_USE_SELECTOR)
         self.sqt_fusion_weight = float(cfg.MODEL.CASS_SQT_FUSION_WEIGHT)
         self.sqt_summary_tau = float(cfg.MODEL.CASS_SQT_SUMMARY_TAU)
+        self.nga_residual_weight = float(cfg.MODEL.CASS_NGA_RESIDUAL_WEIGHT)
+        self.nga_residual_mode = str(cfg.MODEL.CASS_NGA_RESIDUAL_MODE).strip().lower()
         if self.sqt_fusion_weight < 0.0:
             raise ValueError('CASS_SQT_FUSION_WEIGHT must be >= 0, got {}'.format(
                 self.sqt_fusion_weight))
         if self.sqt_summary_tau <= 0.0:
             raise ValueError('CASS_SQT_SUMMARY_TAU must be > 0, got {}'.format(
                 self.sqt_summary_tau))
+        if self.nga_residual_weight < 0.0:
+            raise ValueError('CASS_NGA_RESIDUAL_WEIGHT must be >= 0, got {}'.format(
+                self.nga_residual_weight))
+        if self.nga_residual_mode not in ('cross_mean', 'sqt_gate'):
+            raise ValueError(
+                "CASS_NGA_RESIDUAL_MODE must be 'cross_mean' or 'sqt_gate', got {}".format(
+                    self.nga_residual_mode))
         self.sqt_fusion_norm = nn.LayerNorm(dim)
         self.sqt_aux_loss = None
 
@@ -803,13 +844,36 @@ class CASSModule(nn.Module):
         summary = (patches.float() * weight.unsqueeze(-1)).sum(dim=1)
         return self.sqt_fusion_norm(summary).to(dtype=patches.dtype)
 
-    def _apply_sqt_residual(self, fused, enhanced, structure_scores, modality_names):
+    def _apply_sqt_residual(self, fused, enhanced, structure_scores, modality_names, alpha_dyn=None):
         if self.sqt_fusion_weight <= 0.0:
             return fused
         out = dict(fused)
         for idx, name in enumerate(modality_names):
-            out[name] = out[name] + self.sqt_fusion_weight * self._sqt_summary(
-                enhanced[name], structure_scores[idx])
+            weight = self.sqt_fusion_weight
+            if alpha_dyn is not None and self.nga_residual_weight > 0.0:
+                modality_idx = MODALITY_ORDER.index(name)
+                alpha = alpha_dyn[:, modality_idx:modality_idx + 1].to(
+                    device=fused[name].device, dtype=fused[name].dtype).clamp(0.0, 1.0)
+                weight = weight * (1.0 + self.nga_residual_weight * (2.0 * alpha - 1.0))
+                weight = weight.clamp(0.0, 2.0 * self.sqt_fusion_weight)
+            out[name] = out[name] + weight * self._sqt_summary(enhanced[name], structure_scores[idx])
+        return out
+
+    def _apply_nga_cross_mean_residual(self, fused, alpha_dyn, modality_names):
+        if self.nga_residual_weight <= 0.0 or len(modality_names) < 2:
+            return fused
+
+        stacked = torch.stack([fused[name] for name in modality_names], dim=1)
+        total = stacked.sum(dim=1)
+        denom = float(len(modality_names) - 1)
+        out = {}
+        for local_idx, name in enumerate(modality_names):
+            modality_idx = MODALITY_ORDER.index(name)
+            other_mean = (total - stacked[:, local_idx, :]) / denom
+            alpha = alpha_dyn[:, modality_idx:modality_idx + 1].to(
+                device=fused[name].device, dtype=fused[name].dtype).clamp(0.0, 1.0)
+            residual = other_mean - fused[name]
+            out[name] = fused[name] + self.nga_residual_weight * alpha * residual
         return out
 
     @staticmethod
@@ -909,6 +973,10 @@ class CASSModule(nn.Module):
             fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
         else:
             fused = self._summary_dict(selected, gates)
-        fused = self._apply_sqt_residual(fused, enhanced, structure_scores, modality_names)
+        if self.uses_nga and self.nga_residual_mode == 'cross_mean':
+            fused = self._apply_nga_cross_mean_residual(fused, alpha_dyn, modality_names)
+        sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
+        fused = self._apply_sqt_residual(
+            fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha)
         descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
         return selected, masks, fused, descriptor

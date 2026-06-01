@@ -83,6 +83,16 @@ STAGES = {
         ('baseline_hss_sqt_nga_cagf', 'configs/RGBNT201/sweeps/incremental_hss_sqt_nga_cagf.yml',
          'Baseline + HSS + SQT + NGA + CA-GF'),
     ],
+    'nga_repair': [
+        ('nga_repair_stable', 'configs/RGBNT201/sweeps/nga_repair_stable.yml',
+         'A3 repair: additive SQT + stable NGA residual'),
+        ('nga_cagf_repair_stable', 'configs/RGBNT201/sweeps/nga_cagf_repair_stable.yml',
+         'A4 repair: additive SQT + stable NGA residual + CA-GF'),
+    ],
+    'nga_repair_v2': [
+        ('nga_repair_query_sqt', 'configs/RGBNT201/sweeps/nga_repair_query_sqt.yml',
+         'A3 repair v2: query-anchored NGA + gated SQT additive residual'),
+    ],
     'topk': [
         ('topk_32', 'configs/RGBNT201/sweeps/topk_32.yml', 'CASS_TOPK 32'),
         ('topk_48', 'configs/RGBNT201/sweeps/topk_48.yml', 'CASS_TOPK 48'),
@@ -137,6 +147,8 @@ STAGE_ORDER = [
     'backbone_lr',
     'weight_decay',
     'incremental',
+    'nga_repair',
+    'nga_repair_v2',
     'design',
     'topk',
     'hss_edges',

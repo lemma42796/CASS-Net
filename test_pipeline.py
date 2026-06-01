@@ -27,6 +27,7 @@ Coverage:
   18. AMP dtype selection keeps bf16 unscaled and HSS autocast-safe
  19. SQT fallback alpha and gate-normalized summaries avoid hard SQT-only selection
  20. SQT additive summary keeps tokens intact while preserving SQT gradients
+ 21. NGA residual keeps the additive SQT repair path active when selector is off
 
 Run:
     python3 test_pipeline.py
@@ -626,6 +627,58 @@ def test_sqt_additive_summary_keeps_tokens():
     print('     OK')
 
 
+def test_nga_residual_keeps_additive_path_active():
+    print('[21] NGA residual affects additive SQT path')
+    from modeling.fusion_part.CASS import CASSModule
+
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_ABLATION_STAGE': 'hss_sqt_nga',
+            'MODEL.CASS_NUM_HEADS': 4,
+            'MODEL.CASS_HSS_EDGES': 4,
+            'MODEL.CASS_HSS_FILTERS': 8,
+            'MODEL.CASS_SQT_USE_SELECTOR': 0,
+            'MODEL.CASS_SQT_FUSION_WEIGHT': 0.2,
+            'MODEL.CASS_SQT_DIVERSITY_WEIGHT': 0.0,
+            'MODEL.CASS_NGA_MEMORY': 1,
+            'MODEL.CASS_NGA_WARMUP_EPOCHS': 0,
+            'MODEL.CASS_NGA_EMA_MOMENTUM': 0.0,
+            'MODEL.CASS_NGA_USE_PROTOTYPE': 0,
+            'MODEL.CASS_NGA_RESIDUAL_WEIGHT': 0.2,
+            'MODEL.CASS_NGA_RESIDUAL_MODE': 'sqt_gate',
+        }
+    )
+    torch.manual_seed(23)
+    features = {
+        name: torch.randn(BATCH, 5, 24, device=DEVICE)
+        for name in ('RGB', 'NIR', 'TIR')
+    }
+    memory = torch.randn(BATCH, 3, 24, device=DEVICE)
+    keys = ['a', 'b']
+
+    torch.manual_seed(31)
+    no_memory = CASSModule(dim=24, cfg=cfg, feat_h=2, feat_w=2).to(DEVICE)
+    torch.manual_seed(31)
+    with_memory = CASSModule(dim=24, cfg=cfg, feat_h=2, feat_w=2).to(DEVICE)
+    with_memory.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'], labels=[0, 1], epoch=1)
+
+    no_memory.eval()
+    with_memory.eval()
+    with torch.no_grad():
+        desc_no_memory = no_memory(features, img_path=keys, epoch=1)[3]
+        desc_with_memory = with_memory(features, img_path=keys, epoch=1)[3]
+        desc_with_query_keys = with_memory(features, img_path=['query_a', 'query_b'], epoch=1)[3]
+
+    delta = (desc_no_memory - desc_with_memory).abs().max().item()
+    assert delta > 1e-7, 'NGA memory should affect descriptor when residual is enabled'
+    delta_query = (desc_no_memory - desc_with_query_keys).abs().max().item()
+    assert delta_query > 1e-7, 'NGA memory should affect descriptor for unseen query keys'
+    _assert_finite(desc_with_memory, 'NGA residual descriptor')
+    _assert_finite(desc_with_query_keys, 'NGA query-anchor residual descriptor')
+    print('     OK delta={:.6f}, query_delta={:.6f}'.format(delta, delta_query))
+
+
 def test_hypergraph_broadcast_matches_diag_math():
     print('[15] Hypergraph broadcast matches diagonal math')
     from modeling.fusion_part.CASS import HypergraphConv2d
@@ -827,6 +880,7 @@ def main():
     test_hss_structure_score_mix_changes_self_score()
     test_sqt_fallback_alpha_and_weighted_summary()
     test_sqt_additive_summary_keeps_tokens()
+    test_nga_residual_keeps_additive_path_active()
     test_hypergraph_broadcast_matches_diag_math()
     test_resume_weight_loader()
     test_training_checkpoint_roundtrip()
