@@ -469,6 +469,8 @@ class HTLReID(nn.Module):
                 loss_aux = self._auxiliary_losses(
                     selected['RGB'], selected['NIR'], selected['TIR'],
                     masks, quality_scores, has_tir=True)
+                loss_aux = loss_aux + self.CASS.auxiliary_loss(
+                    loss_aux.device, loss_aux.dtype)
                 if self.use_cass_part:
                     part_feat = self._part_feature(
                         selected['RGB'], selected['NIR'], selected['TIR'], quality_scores)
@@ -601,6 +603,8 @@ class HTLReID(nn.Module):
                 loss_aux = self._auxiliary_losses(
                     selected['RGB'], selected['NIR'], TIR_selected,
                     masks, quality_scores, has_tir=False)
+                loss_aux = loss_aux + self.CASS.auxiliary_loss(
+                    loss_aux.device, loss_aux.dtype)
                 if self.use_cass_part:
                     part_feat = self._part_feature(
                         selected['RGB'], selected['NIR'], TIR_selected, quality_scores)

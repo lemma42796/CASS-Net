@@ -22,9 +22,10 @@ Coverage:
  13. HSS gate floor unblocks graph-branch gradients
  14. HSS structural score mix changes selector signal
  15. Hypergraph broadcast path matches the old diagonal math
- 16. Staged resume weight loader, including full training checkpoint payloads
- 17. Full training checkpoint save -> resume round-trip
- 18. AMP dtype selection keeps bf16 unscaled and HSS autocast-safe
+  16. Staged resume weight loader, including full training checkpoint payloads
+  17. Full training checkpoint save -> resume round-trip
+  18. AMP dtype selection keeps bf16 unscaled and HSS autocast-safe
+ 19. SQT fallback alpha and gate-normalized summaries avoid hard SQT-only selection
 
 Run:
     python3 test_pipeline.py
@@ -549,6 +550,39 @@ def test_hss_structure_score_mix_changes_self_score():
     print('     OK')
 
 
+def test_sqt_fallback_alpha_and_weighted_summary():
+    print('[19] SQT fallback alpha and gate-normalized summary')
+    from modeling.fusion_part.CASS import CASSModule, DynamicCollaborativeSelector
+
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_ABLATION_STAGE': 'hss_sqt',
+            'MODEL.CASS_SQT_FALLBACK_ALPHA': 0.35,
+            'MODEL.CASS_DYNAMIC_TOPK': 0,
+            'MODEL.CASS_TOPK': 2,
+            'MODEL.CASS_SOFT_RESIDUAL_WEIGHT': 0.25,
+        }
+    )
+    model = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).to(DEVICE)
+    assert abs(model.CASS.sqt_fallback_alpha - 0.35) < 1e-12
+
+    selector = DynamicCollaborativeSelector(cfg).to(DEVICE)
+    feat = torch.zeros(1, 5, 2, device=DEVICE)
+    feat[:, 1:, 0] = torch.tensor([[1.0, 2.0, 3.0, 4.0]], device=DEVICE)
+    score_self = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=DEVICE)
+    score_structure = torch.tensor([[0.0, 0.0, 1.0, 0.0]], device=DEVICE)
+    alpha = torch.full((1, 1), 0.5, device=DEVICE)
+    selected, mask, gate = selector(feat, score_self, score_structure, alpha)
+
+    assert mask.sum().item() == 2
+    assert gate.min().item() >= 0.25 - 1e-6
+    summary = CASSModule._token_summary(selected, gate)
+    expected = selected[:, 1:, :].sum(dim=1) / gate.sum(dim=1, keepdim=True)
+    assert torch.allclose(summary, expected, atol=1e-6, rtol=1e-5)
+    print('     OK')
+
+
 def test_hypergraph_broadcast_matches_diag_math():
     print('[15] Hypergraph broadcast matches diagonal math')
     from modeling.fusion_part.CASS import HypergraphConv2d
@@ -748,6 +782,7 @@ def main():
     test_hss_graph_warmup()
     test_hss_gate_floor_unblocks_graph_gradients()
     test_hss_structure_score_mix_changes_self_score()
+    test_sqt_fallback_alpha_and_weighted_summary()
     test_hypergraph_broadcast_matches_diag_math()
     test_resume_weight_loader()
     test_training_checkpoint_roundtrip()

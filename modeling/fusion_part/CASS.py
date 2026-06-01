@@ -330,32 +330,73 @@ class CrossAttention(nn.Module):
     def forward(self, query, context):
         b, n, c = context.shape
         context = self.norm_context(context)
-        q = self.q(query).view(b, 1, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+        single_query = query.dim() == 2
+        if single_query:
+            query = query.unsqueeze(1)
+        q_len = query.size(1)
+        q = self.q(query).view(b, q_len, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
         k = self.k(context).view(b, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
         v = self.v(context).view(b, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = self.attn_drop(attn.softmax(dim=-1))
-        out = (attn @ v).transpose(1, 2).reshape(b, c)
-        return self.proj_drop(self.proj(out))
+        out = (attn @ v).transpose(1, 2).reshape(b, q_len, c)
+        out = self.proj_drop(self.proj(out))
+        return out.squeeze(1) if single_query else out
 
 
 class SynergyQueryToken(nn.Module):
-    def __init__(self, dim, num_heads):
+    def __init__(self, dim, num_heads, cfg):
         super().__init__()
-        self.query_token = nn.Parameter(torch.zeros(1, dim))
+        self.num_queries = int(cfg.MODEL.CASS_SQT_NUM_QUERIES)
+        if self.num_queries < 1:
+            raise ValueError('CASS_SQT_NUM_QUERIES must be >= 1, got {}'.format(
+                self.num_queries))
+        self.query_token = nn.Parameter(torch.zeros(1, self.num_queries, dim))
         nn.init.trunc_normal_(self.query_token, std=0.02)
         self.attn = CrossAttention(dim, num_heads=num_heads, qkv_bias=True)
         self.norm = nn.LayerNorm(dim)
+        self.query_norm = nn.LayerNorm(dim)
+        self.score_norm = nn.LayerNorm(dim)
+        self.cls_query = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.cls_query_weight = float(cfg.MODEL.CASS_SQT_CLS_QUERY_WEIGHT)
+        self.cls_score_weight = float(cfg.MODEL.CASS_SQT_CLS_SCORE_WEIGHT)
+        for name, value in (
+                ('CASS_SQT_CLS_QUERY_WEIGHT', self.cls_query_weight),
+                ('CASS_SQT_CLS_SCORE_WEIGHT', self.cls_score_weight)):
+            if value < 0.0 or value > 1.0:
+                raise ValueError('{} must be in [0, 1], got {}'.format(name, value))
 
     def forward(self, feats):
         all_patches = torch.cat([feat[:, 1:, :] for feat in feats], dim=1)
-        query = self.query_token.expand(all_patches.size(0), -1)
+        cls_context = torch.stack([feat[:, 0, :] for feat in feats], dim=1).mean(dim=1)
+        query = self.query_token.expand(all_patches.size(0), -1, -1)
+        cls_delta = self.cls_query(cls_context).unsqueeze(1)
+        query = self.query_norm(query + self.cls_query_weight * cls_delta)
         prototype = self.norm(self.attn(query, all_patches))
+        proto_norm = F.normalize(prototype, dim=-1)
         scores = []
         for feat in feats:
             patches = feat[:, 1:, :]
-            scores.append(F.cosine_similarity(patches, prototype.unsqueeze(1), dim=-1))
-        return scores, prototype
+            patch_norm = F.normalize(patches, dim=-1)
+            proto_score = (patch_norm @ proto_norm.transpose(1, 2)).max(dim=-1).values
+            cls_anchor = self.score_norm(feat[:, 0, :])
+            cls_score = F.cosine_similarity(patches, cls_anchor.unsqueeze(1), dim=-1)
+            score = ((1.0 - self.cls_score_weight) * proto_score
+                     + self.cls_score_weight * cls_score)
+            scores.append(score)
+        if self.num_queries == 1:
+            diversity = prototype.new_zeros(())
+        else:
+            sim = proto_norm @ proto_norm.transpose(1, 2)
+            eye = torch.eye(self.num_queries, device=sim.device, dtype=sim.dtype).unsqueeze(0)
+            diversity = ((sim * (1.0 - eye)).pow(2).sum(dim=(1, 2)) /
+                         float(self.num_queries * (self.num_queries - 1))).mean()
+        return scores, prototype, diversity
 
 
 class NeighborhoodGuidedAdapter(nn.Module):
@@ -547,6 +588,11 @@ class DynamicCollaborativeSelector(nn.Module):
         self.use_ste = bool(cfg.MODEL.CASS_STE)
         self.ste_tau = float(cfg.MODEL.CASS_STE_TAU)
         self.soft_residual_weight = float(cfg.MODEL.CASS_SOFT_RESIDUAL_WEIGHT)
+        self.use_soft_gate = bool(cfg.MODEL.CASS_SELECTOR_SOFT_GATE)
+        self.soft_gate_tau = float(cfg.MODEL.CASS_SOFT_GATE_TAU)
+        if self.soft_gate_tau <= 0:
+            raise ValueError('CASS_SOFT_GATE_TAU must be > 0, got {}'.format(
+                self.soft_gate_tau))
 
     @staticmethod
     def _minmax(score, eps=1e-8):
@@ -592,20 +638,26 @@ class DynamicCollaborativeSelector(nn.Module):
         mask = torch.zeros(b, n, device=patches.device, dtype=torch.bool)
         mask.scatter_(1, topk_idx, active)
 
-        hard = mask.to(patches.dtype)
         residual = min(max(self.soft_residual_weight, 0.0), 1.0)
-        if residual > 0.0:
-            hard = residual + (1.0 - residual) * hard
-        if self.use_ste and self.training:
-            soft = F.softmax(score / self.ste_tau, dim=1) * k_float.view(b, 1).to(score.dtype)
-            soft = soft.clamp(max=1.0)
+        if self.use_soft_gate:
+            soft = torch.sigmoid((score - 0.5) / self.soft_gate_tau)
             if residual > 0.0:
                 soft = residual + (1.0 - residual) * soft
-            gate = hard + soft - soft.detach()
+            gate = soft.to(patches.dtype)
         else:
-            gate = hard
+            hard = mask.to(patches.dtype)
+            if residual > 0.0:
+                hard = residual + (1.0 - residual) * hard
+            if self.use_ste and self.training:
+                soft = F.softmax(score / self.ste_tau, dim=1) * k_float.view(b, 1).to(score.dtype)
+                soft = soft.clamp(max=1.0)
+                if residual > 0.0:
+                    soft = residual + (1.0 - residual) * soft
+                gate = hard + soft - soft.detach()
+            else:
+                gate = hard
         selected = torch.cat([cls_token, patches * gate.unsqueeze(-1)], dim=1)
-        return selected, mask
+        return selected, mask, gate
 
 
 class ContextAwareGatedFusion(nn.Module):
@@ -673,10 +725,17 @@ class CASSModule(nn.Module):
         self.stage_rank = CASS_STAGE_RANK[self.stage]
         heads = int(cfg.MODEL.CASS_NUM_HEADS)
         self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg)
-        self.sqt = SynergyQueryToken(dim, num_heads=heads)
+        self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg)
         self.nga = NeighborhoodGuidedAdapter(dim, cfg)
         self.selector = DynamicCollaborativeSelector(cfg)
         self.fusion = ContextAwareGatedFusion(dim, num_heads=heads)
+        self.sqt_fallback_alpha = float(cfg.MODEL.CASS_SQT_FALLBACK_ALPHA)
+        if self.sqt_fallback_alpha < 0.0 or self.sqt_fallback_alpha > 1.0:
+            raise ValueError(
+                'CASS_SQT_FALLBACK_ALPHA must be in [0, 1], got {}'.format(
+                    self.sqt_fallback_alpha))
+        self.sqt_diversity_weight = float(cfg.MODEL.CASS_SQT_DIVERSITY_WEIGHT)
+        self.sqt_aux_loss = None
 
     @property
     def uses_hss(self):
@@ -714,13 +773,17 @@ class CASSModule(nn.Module):
         return masks
 
     @staticmethod
-    def _token_summary(feat):
+    def _token_summary(feat, gate=None):
         patches = feat[:, 1:, :]
+        if gate is not None:
+            denom = gate.sum(dim=1, keepdim=True).to(
+                device=patches.device, dtype=patches.dtype).clamp_min(1e-6)
+            return feat[:, 0, :] + patches.sum(dim=1) / denom
         return feat[:, 0, :] + patches.mean(dim=1)
 
-    def _summary_dict(self, token_features):
+    def _summary_dict(self, token_features, gates=None):
         return {
-            name: self._token_summary(feat)
+            name: self._token_summary(feat, None if gates is None else gates.get(name))
             for name, feat in token_features.items()
         }
 
@@ -752,7 +815,13 @@ class CASSModule(nn.Module):
             (batch_size, len(MODALITY_ORDER)),
             ratio, device=device, dtype=dtype)
 
+    def auxiliary_loss(self, device, dtype):
+        if self.sqt_aux_loss is None:
+            return torch.zeros((), device=device, dtype=dtype)
+        return self.sqt_aux_loss.to(device=device, dtype=dtype)
+
     def forward(self, features, img_path=None, quality_scores=None, epoch=None):
+        self.sqt_aux_loss = None
         modality_names = list(features.keys())
         if not self.uses_full_design:
             quality_scores = None
@@ -774,7 +843,8 @@ class CASSModule(nn.Module):
             return selected, masks, fused, descriptor
 
         enhanced_list = [enhanced[name] for name in modality_names]
-        structure_scores, _ = self.sqt(enhanced_list)
+        structure_scores, _, sqt_diversity = self.sqt(enhanced_list)
+        self.sqt_aux_loss = self.sqt_diversity_weight * sqt_diversity
         cls_list = [features[name][:, 0, :] for name in modality_names]
         if quality_scores is not None:
             template = cls_list[0]
@@ -784,8 +854,9 @@ class CASSModule(nn.Module):
                 cls_list, modality_names, keys=img_path, quality_scores=quality_scores)
         else:
             template = cls_list[0]
-            alpha_dyn = torch.ones(
-                template.size(0), len(MODALITY_ORDER),
+            alpha_dyn = torch.full(
+                (template.size(0), len(MODALITY_ORDER)),
+                self.sqt_fallback_alpha,
                 device=template.device, dtype=template.dtype)
             keep_ratio = self._base_keep_ratio(
                 template.size(0), enhanced_list[0].size(1) - 1,
@@ -794,18 +865,19 @@ class CASSModule(nn.Module):
 
         selected = {}
         masks = {}
+        gates = {}
         for idx, name in enumerate(modality_names):
             modality_idx = MODALITY_ORDER.index(name)
             alpha = alpha_dyn[:, modality_idx:modality_idx + 1]
             ratio = keep_ratio[:, modality_idx:modality_idx + 1] if keep_ratio is not None else None
             quality = quality_scores[:, modality_idx:modality_idx + 1] \
                 if quality_scores is not None else None
-            selected[name], masks[name] = self.selector(
+            selected[name], masks[name], gates[name] = self.selector(
                 enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio, quality)
 
         if self.uses_cagf:
             fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
         else:
-            fused = self._summary_dict(selected)
+            fused = self._summary_dict(selected, gates)
         descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
         return selected, masks, fused, descriptor
