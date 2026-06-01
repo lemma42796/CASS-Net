@@ -1,6 +1,8 @@
 notes/
 *.local.md
 .DS_Store
+__pycache__/
+*.py[cod]
 
 # Local handoff/private notes
 CASS-Net编码交接.md
