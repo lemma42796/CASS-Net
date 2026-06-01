@@ -28,6 +28,8 @@ Coverage:
  19. SQT fallback alpha and gate-normalized summaries avoid hard SQT-only selection
  20. SQT additive summary keeps tokens intact while preserving SQT gradients
  21. NGA residual keeps the additive SQT repair path active when selector is off
+ 22. CA-GF residual keeps the repaired A3 descriptor as the identity path
+ 23. CA-GF agreement mode suppresses conflicting cross-modal context
 
 Run:
     python3 test_pipeline.py
@@ -679,6 +681,123 @@ def test_nga_residual_keeps_additive_path_active():
     print('     OK delta={:.6f}, query_delta={:.6f}'.format(delta, delta_query))
 
 
+def test_cagf_residual_preserves_repaired_a3_identity():
+    print('[22] CA-GF residual preserves repaired A3 identity path')
+    from modeling.fusion_part.CASS import CASSModule
+
+    base_overrides = {
+        'MODEL.CASS_NUM_HEADS': 4,
+        'MODEL.CASS_HSS_EDGES': 4,
+        'MODEL.CASS_HSS_FILTERS': 8,
+        'MODEL.CASS_SQT_USE_SELECTOR': 0,
+        'MODEL.CASS_SQT_FUSION_WEIGHT': 0.2,
+        'MODEL.CASS_SQT_DIVERSITY_WEIGHT': 0.0,
+        'MODEL.CASS_NGA_MEMORY': 1,
+        'MODEL.CASS_NGA_WARMUP_EPOCHS': 0,
+        'MODEL.CASS_NGA_EMA_MOMENTUM': 0.0,
+        'MODEL.CASS_NGA_USE_PROTOTYPE': 0,
+        'MODEL.CASS_NGA_RESIDUAL_WEIGHT': 0.2,
+        'MODEL.CASS_NGA_RESIDUAL_MODE': 'sqt_gate',
+        'MODEL.CASS_CAGF_MODE': 'agreement',
+        'MODEL.CASS_CAGF_MIN_AGREE': -1.0,
+        'MODEL.CASS_CAGF_AGREE_TAU': 0.25,
+        'MODEL.CASS_CAGF_MAX_GATE': 0.5,
+        'MODEL.CASS_CAGF_MAX_RESIDUAL_NORM': 1.0,
+        'MODEL.CASS_CAGF_WARMUP_EPOCHS': 0,
+        'MODEL.CASS_CAGF_RAMP_EPOCHS': 0,
+    }
+    cfg_a3 = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **dict(base_overrides, **{
+            'MODEL.CASS_ABLATION_STAGE': 'hss_sqt_nga',
+            'MODEL.CASS_CAGF_RESIDUAL_WEIGHT': 0.0,
+        })
+    )
+    cfg_cagf_zero = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **dict(base_overrides, **{
+            'MODEL.CASS_ABLATION_STAGE': 'hss_sqt_nga_cagf',
+            'MODEL.CASS_CAGF_RESIDUAL_WEIGHT': 0.0,
+        })
+    )
+    cfg_cagf_on = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **dict(base_overrides, **{
+            'MODEL.CASS_ABLATION_STAGE': 'hss_sqt_nga_cagf',
+            'MODEL.CASS_CAGF_RESIDUAL_WEIGHT': 0.2,
+        })
+    )
+    torch.manual_seed(43)
+    features = {
+        name: torch.randn(BATCH, 5, 24, device=DEVICE)
+        for name in ('RGB', 'NIR', 'TIR')
+    }
+    keys = ['a', 'b']
+    memory = torch.randn(BATCH, 3, 24, device=DEVICE)
+
+    torch.manual_seed(47)
+    a3 = CASSModule(dim=24, cfg=cfg_a3, feat_h=2, feat_w=2).to(DEVICE)
+    torch.manual_seed(47)
+    cagf_zero = CASSModule(dim=24, cfg=cfg_cagf_zero, feat_h=2, feat_w=2).to(DEVICE)
+    torch.manual_seed(47)
+    cagf_on = CASSModule(dim=24, cfg=cfg_cagf_on, feat_h=2, feat_w=2).to(DEVICE)
+    for module in (a3, cagf_zero, cagf_on):
+        module.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'], labels=[0, 1], epoch=1)
+        module.eval()
+
+    with torch.no_grad():
+        desc_a3 = a3(features, img_path=keys, epoch=1)[3]
+        desc_zero = cagf_zero(features, img_path=keys, epoch=1)[3]
+        desc_on = cagf_on(features, img_path=keys, epoch=1)[3]
+
+    assert torch.allclose(desc_a3, desc_zero, atol=1e-6, rtol=1e-5)
+    delta = (desc_on - desc_a3).abs().max().item()
+    assert delta > 1e-7, 'CA-GF residual should affect descriptor when enabled'
+    _assert_finite(desc_on, 'CA-GF residual descriptor')
+    print('     OK delta={:.6f}'.format(delta))
+
+
+def test_cagf_agreement_rejects_conflicting_context():
+    print('[23] CA-GF agreement rejects conflicting context')
+    from modeling.fusion_part.CASS import ContextAwareGatedFusion
+
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_CAGF_MODE': 'agreement',
+            'MODEL.CASS_CAGF_RESIDUAL_WEIGHT': 1.0,
+            'MODEL.CASS_CAGF_MIN_AGREE': 0.25,
+            'MODEL.CASS_CAGF_AGREE_TAU': 0.05,
+            'MODEL.CASS_CAGF_MAX_GATE': 1.0,
+            'MODEL.CASS_CAGF_MAX_RESIDUAL_NORM': 1.0,
+            'MODEL.CASS_CAGF_WARMUP_EPOCHS': 0,
+            'MODEL.CASS_CAGF_RAMP_EPOCHS': 0,
+        }
+    )
+    fusion = ContextAwareGatedFusion(dim=4, num_heads=1, cfg=cfg).to(DEVICE)
+    selected = {
+        name: torch.zeros(BATCH, 2, 4, device=DEVICE)
+        for name in ('RGB', 'NIR')
+    }
+    gate_bias = torch.zeros(BATCH, 4, device=DEVICE)
+    target = torch.tensor([[1.0, 0.0, 0.0, 0.0],
+                           [1.0, 0.0, 0.0, 0.0]], device=DEVICE)
+    aligned = torch.tensor([[0.8, 0.6, 0.0, 0.0],
+                            [0.8, 0.6, 0.0, 0.0]], device=DEVICE)
+    opposite = -target
+
+    good = fusion(selected, gate_bias, ['RGB', 'NIR'],
+                  base_fused={'RGB': target, 'NIR': aligned}, epoch=1)['RGB']
+    bad = fusion(selected, gate_bias, ['RGB', 'NIR'],
+                 base_fused={'RGB': target, 'NIR': opposite}, epoch=1)['RGB']
+    good_delta = (good - target).norm(dim=-1).mean().item()
+    bad_delta = (bad - target).norm(dim=-1).mean().item()
+    assert good_delta > 1e-3, 'aligned source should produce a visible CA-GF update'
+    assert bad_delta < 0.1 * good_delta, 'conflicting source should be strongly gated'
+    print('     OK aligned_delta={:.6f}, conflicting_delta={:.6f}'.format(
+        good_delta, bad_delta))
+
+
 def test_hypergraph_broadcast_matches_diag_math():
     print('[15] Hypergraph broadcast matches diagonal math')
     from modeling.fusion_part.CASS import HypergraphConv2d
@@ -881,6 +1000,8 @@ def main():
     test_sqt_fallback_alpha_and_weighted_summary()
     test_sqt_additive_summary_keeps_tokens()
     test_nga_residual_keeps_additive_path_active()
+    test_cagf_residual_preserves_repaired_a3_identity()
+    test_cagf_agreement_rejects_conflicting_context()
     test_hypergraph_broadcast_matches_diag_math()
     test_resume_weight_loader()
     test_training_checkpoint_roundtrip()

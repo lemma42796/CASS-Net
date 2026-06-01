@@ -93,6 +93,14 @@ STAGES = {
         ('nga_repair_query_sqt', 'configs/RGBNT201/sweeps/nga_repair_query_sqt.yml',
          'A3 repair v2: query-anchored NGA + gated SQT additive residual'),
     ],
+    'cagf_repair_v2': [
+        ('nga_cagf_repair_query_sqt', 'configs/RGBNT201/sweeps/nga_cagf_repair_query_sqt.yml',
+         'A4 repair v2: residual CA-GF on query-anchored NGA + SQT additive'),
+    ],
+    'cagf_agree_v3': [
+        ('nga_cagf_agree_query_sqt', 'configs/RGBNT201/sweeps/nga_cagf_agree_query_sqt.yml',
+         'A4 repair v3: descriptor agreement CA-GF on query-anchored NGA + SQT additive'),
+    ],
     'topk': [
         ('topk_32', 'configs/RGBNT201/sweeps/topk_32.yml', 'CASS_TOPK 32'),
         ('topk_48', 'configs/RGBNT201/sweeps/topk_48.yml', 'CASS_TOPK 48'),
@@ -149,6 +157,8 @@ STAGE_ORDER = [
     'incremental',
     'nga_repair',
     'nga_repair_v2',
+    'cagf_repair_v2',
+    'cagf_agree_v3',
     'design',
     'topk',
     'hss_edges',

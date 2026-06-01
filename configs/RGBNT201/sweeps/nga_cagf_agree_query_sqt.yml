@@ -1,0 +1,28 @@
+# CA-GF repair v3: descriptor-level agreement refinement.
+# Keeps the repaired A3 descriptor as the identity path and only nudges a
+# modality toward other modalities when their normalized descriptors already
+# agree. This avoids random cross-attention directions damaging the ranking.
+MODEL:
+  CASS_ABLATION_STAGE: 'hss_sqt_nga_cagf'
+  CASS_QUALITY_AWARE: 0
+  CASS_PART_BRANCH: 0
+  CASS_SQT_USE_SELECTOR: 0
+  CASS_SQT_FUSION_WEIGHT: 0.2
+  CASS_SQT_DIVERSITY_WEIGHT: 0.0
+  CASS_NGA_MEMORY: 1
+  CASS_NGA_REFRESH_PERIOD: 2
+  CASS_NGA_WARMUP_EPOCHS: 5
+  CASS_NGA_EMA_MOMENTUM: 0.5
+  CASS_NGA_USE_PROTOTYPE: 1
+  CASS_NGA_QUERY_ANCHOR: 1
+  CASS_NGA_RESIDUAL_MODE: 'sqt_gate'
+  CASS_NGA_RESIDUAL_WEIGHT: 0.30
+  CASS_CAGF_MODE: 'agreement'
+  CASS_CAGF_RESIDUAL_WEIGHT: 0.08
+  CASS_CAGF_MIN_AGREE: 0.25
+  CASS_CAGF_AGREE_TAU: 0.12
+  CASS_CAGF_MAX_GATE: 0.25
+  CASS_CAGF_MAX_RESIDUAL_NORM: 0.20
+  CASS_CAGF_DETACH_CONTEXT: 1
+  CASS_CAGF_WARMUP_EPOCHS: 5
+  CASS_CAGF_RAMP_EPOCHS: 3

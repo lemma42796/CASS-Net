@@ -693,27 +693,63 @@ class DynamicCollaborativeSelector(nn.Module):
 
 
 class ContextAwareGatedFusion(nn.Module):
-    def __init__(self, dim, num_heads):
+    def __init__(self, dim, num_heads, cfg):
         super().__init__()
-        self.cross_blocks = nn.ModuleDict()
-        for target in MODALITY_ORDER:
-            for source in MODALITY_ORDER:
-                if target != source:
-                    key = '{}<-{}'.format(target, source)
-                    self.cross_blocks[key] = CrossAttention(dim, num_heads=num_heads, qkv_bias=True)
-        self.self_blocks = nn.ModuleDict({
-            name: CrossAttention(dim, num_heads=num_heads, qkv_bias=True)
-            for name in MODALITY_ORDER
-        })
-        self.gates = nn.ModuleDict()
-        for target in MODALITY_ORDER:
-            for source in MODALITY_ORDER:
-                if target != source:
-                    key = '{}<-{}'.format(target, source)
-                    self.gates[key] = nn.Sequential(
-                        nn.Linear(2 * dim, dim),
-                        nn.LayerNorm(dim),
-                    )
+        self.mode = str(cfg.MODEL.CASS_CAGF_MODE).strip().lower()
+        self.residual_weight = float(cfg.MODEL.CASS_CAGF_RESIDUAL_WEIGHT)
+        self.self_weight = float(cfg.MODEL.CASS_CAGF_SELF_WEIGHT)
+        self.min_agree = float(cfg.MODEL.CASS_CAGF_MIN_AGREE)
+        self.agree_tau = float(cfg.MODEL.CASS_CAGF_AGREE_TAU)
+        self.max_gate = float(cfg.MODEL.CASS_CAGF_MAX_GATE)
+        self.max_residual_norm = float(cfg.MODEL.CASS_CAGF_MAX_RESIDUAL_NORM)
+        self.detach_context = bool(cfg.MODEL.CASS_CAGF_DETACH_CONTEXT)
+        self.warmup_epochs = int(cfg.MODEL.CASS_CAGF_WARMUP_EPOCHS)
+        self.ramp_epochs = int(cfg.MODEL.CASS_CAGF_RAMP_EPOCHS)
+        if self.mode not in ('attention', 'agreement'):
+            raise ValueError("CASS_CAGF_MODE must be 'attention' or 'agreement', got {}".format(
+                self.mode))
+        if self.residual_weight < 0.0:
+            raise ValueError('CASS_CAGF_RESIDUAL_WEIGHT must be >= 0, got {}'.format(
+                self.residual_weight))
+        if self.self_weight < 0.0:
+            raise ValueError('CASS_CAGF_SELF_WEIGHT must be >= 0, got {}'.format(
+                self.self_weight))
+        if self.agree_tau <= 0.0:
+            raise ValueError('CASS_CAGF_AGREE_TAU must be > 0, got {}'.format(
+                self.agree_tau))
+        if self.max_gate < 0.0 or self.max_gate > 1.0:
+            raise ValueError('CASS_CAGF_MAX_GATE must be in [0, 1], got {}'.format(
+                self.max_gate))
+        if self.max_residual_norm < 0.0:
+            raise ValueError('CASS_CAGF_MAX_RESIDUAL_NORM must be >= 0, got {}'.format(
+                self.max_residual_norm))
+        if self.warmup_epochs < 0:
+            raise ValueError('CASS_CAGF_WARMUP_EPOCHS must be >= 0, got {}'.format(
+                self.warmup_epochs))
+        if self.ramp_epochs < 0:
+            raise ValueError('CASS_CAGF_RAMP_EPOCHS must be >= 0, got {}'.format(
+                self.ramp_epochs))
+        if self.mode == 'attention':
+            self.cross_blocks = nn.ModuleDict()
+            for target in MODALITY_ORDER:
+                for source in MODALITY_ORDER:
+                    if target != source:
+                        key = '{}<-{}'.format(target, source)
+                        self.cross_blocks[key] = CrossAttention(
+                            dim, num_heads=num_heads, qkv_bias=True)
+            self.self_blocks = nn.ModuleDict({
+                name: CrossAttention(dim, num_heads=num_heads, qkv_bias=True)
+                for name in MODALITY_ORDER
+            })
+            self.gates = nn.ModuleDict()
+            for target in MODALITY_ORDER:
+                for source in MODALITY_ORDER:
+                    if target != source:
+                        key = '{}<-{}'.format(target, source)
+                        self.gates[key] = nn.Sequential(
+                            nn.Linear(2 * dim, dim),
+                            nn.LayerNorm(dim),
+                        )
         self.priority = ('NIR', 'TIR', 'RGB')
 
     def _ordered_sources(self, target, modality_names):
@@ -726,13 +762,29 @@ class ContextAwareGatedFusion(nn.Module):
         idx = MODALITY_ORDER.index(name)
         return quality_scores[:, idx:idx + 1].to(device=device, dtype=dtype)
 
-    def forward(self, selected, gate_bias, modality_names, quality_scores=None):
+    def _epoch_scale(self, epoch):
+        if self.residual_weight <= 0.0:
+            return 0.0
+        if epoch is None:
+            return 1.0
+        epoch = int(epoch)
+        if epoch <= self.warmup_epochs:
+            return 0.0
+        if self.ramp_epochs <= 0:
+            return 1.0
+        return min(1.0, float(epoch - self.warmup_epochs) / float(self.ramp_epochs))
+
+    def _forward_attention(self, selected, gate_bias, modality_names, quality_scores=None,
+                           base_fused=None):
         fused = {}
         for target in modality_names:
-            cls = selected[target][:, 0, :]
-            batch_size = cls.size(0)
+            token_cls = selected[target][:, 0, :]
+            cls = base_fused[target] if base_fused is not None else token_cls
+            batch_size = token_cls.size(0)
             q_target = self._quality(
                 quality_scores, target, batch_size, cls.device, cls.dtype)
+            residual = torch.zeros_like(cls)
+            source_count = 0
             for source in self._ordered_sources(target, modality_names):
                 key = '{}<-{}'.format(target, source)
                 q_source = self._quality(
@@ -741,10 +793,81 @@ class ContextAwareGatedFusion(nn.Module):
                 delta = self.cross_blocks[key](cls, context)
                 gate = torch.sigmoid(self.gates[key](torch.cat([cls, delta], dim=-1)) + gate_bias)
                 gate = gate * q_source
-                cls = (1.0 - gate) * cls + gate * delta
-            cls = cls + q_target * self.self_blocks[target](cls, selected[target][:, 1:, :])
-            fused[target] = cls
+                residual = residual + gate * (delta - cls)
+                source_count += 1
+            if source_count > 0:
+                residual = residual / float(source_count)
+            if self.self_weight > 0.0:
+                self_delta = self.self_blocks[target](cls, selected[target][:, 1:, :])
+                residual = residual + self.self_weight * q_target * (self_delta - cls)
+            fused[target] = cls + self.residual_weight * residual
         return fused
+
+    def _forward_agreement(self, selected, gate_bias, modality_names, quality_scores=None,
+                           base_fused=None, epoch=None):
+        epoch_scale = self._epoch_scale(epoch)
+        base = {
+            name: base_fused[name] if base_fused is not None else selected[name][:, 0, :]
+            for name in modality_names
+        }
+        if epoch_scale <= 0.0 or len(modality_names) < 2:
+            noop = gate_bias.sum(dim=1, keepdim=True).to(
+                device=next(iter(base.values())).device,
+                dtype=next(iter(base.values())).dtype) * 0.0
+            return {name: value + noop for name, value in base.items()}
+
+        fused = {}
+        normed = {name: F.normalize(base[name].float(), dim=-1) for name in modality_names}
+        bias_mod = 1.0 + 0.25 * torch.tanh(gate_bias.float().mean(dim=-1, keepdim=True))
+        for target in modality_names:
+            cls = base[target]
+            cls_float = cls.float()
+            batch_size = cls.size(0)
+            q_target = self._quality(
+                quality_scores, target, batch_size, cls.device, cls.dtype).float()
+            weighted_sum = torch.zeros_like(cls_float)
+            weight_sum = torch.zeros(batch_size, 1, device=cls.device, dtype=cls_float.dtype)
+            source_count = 0
+            for source in self._ordered_sources(target, modality_names):
+                source_vec = base[source]
+                if self.detach_context:
+                    source_vec = source_vec.detach()
+                source_float = source_vec.float()
+                q_source = self._quality(
+                    quality_scores, source, batch_size, cls.device, cls.dtype).float()
+                cosine = (normed[target] * F.normalize(source_float, dim=-1)).sum(
+                    dim=-1, keepdim=True)
+                agreement = torch.sigmoid((cosine - self.min_agree) / self.agree_tau)
+                weight = agreement * q_source * bias_mod
+                weighted_sum = weighted_sum + weight * source_float
+                weight_sum = weight_sum + weight
+                source_count += 1
+
+            if source_count == 0:
+                fused[target] = cls
+                continue
+            confidence = (weight_sum / float(source_count)).clamp(0.0, self.max_gate) * q_target
+            consensus = weighted_sum / weight_sum.clamp_min(1e-6)
+            target_norm = cls_float.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            consensus = F.normalize(consensus, dim=-1) * target_norm
+            residual = consensus - cls_float
+            if self.max_residual_norm > 0.0:
+                residual_norm = residual.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                max_norm = self.max_residual_norm * target_norm
+                residual = residual * (max_norm / residual_norm).clamp(max=1.0)
+            update = epoch_scale * self.residual_weight * confidence * residual
+            fused[target] = (cls_float + update).to(dtype=cls.dtype)
+        return fused
+
+    def forward(self, selected, gate_bias, modality_names, quality_scores=None, base_fused=None,
+                epoch=None):
+        if self.mode == 'attention':
+            return self._forward_attention(
+                selected, gate_bias, modality_names,
+                quality_scores=quality_scores, base_fused=base_fused)
+        return self._forward_agreement(
+            selected, gate_bias, modality_names,
+            quality_scores=quality_scores, base_fused=base_fused, epoch=epoch)
 
 
 class CASSModule(nn.Module):
@@ -760,7 +883,7 @@ class CASSModule(nn.Module):
         self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg)
         self.nga = NeighborhoodGuidedAdapter(dim, cfg)
         self.selector = DynamicCollaborativeSelector(cfg)
-        self.fusion = ContextAwareGatedFusion(dim, num_heads=heads)
+        self.fusion = ContextAwareGatedFusion(dim, num_heads=heads, cfg=cfg)
         self.sqt_fallback_alpha = float(cfg.MODEL.CASS_SQT_FALLBACK_ALPHA)
         if self.sqt_fallback_alpha < 0.0 or self.sqt_fallback_alpha > 1.0:
             raise ValueError(
@@ -969,14 +1092,15 @@ class CASSModule(nn.Module):
             masks = self._all_token_masks(selected)
             gates = None
 
-        if self.uses_cagf:
-            fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
-        else:
-            fused = self._summary_dict(selected, gates)
+        fused = self._summary_dict(selected, gates)
         if self.uses_nga and self.nga_residual_mode == 'cross_mean':
             fused = self._apply_nga_cross_mean_residual(fused, alpha_dyn, modality_names)
         sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
         fused = self._apply_sqt_residual(
             fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha)
+        if self.uses_cagf:
+            fused = self.fusion(
+                selected, gate_bias, modality_names,
+                quality_scores=quality_scores, base_fused=fused, epoch=epoch)
         descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
         return selected, masks, fused, descriptor
