@@ -735,6 +735,16 @@ class CASSModule(nn.Module):
                 'CASS_SQT_FALLBACK_ALPHA must be in [0, 1], got {}'.format(
                     self.sqt_fallback_alpha))
         self.sqt_diversity_weight = float(cfg.MODEL.CASS_SQT_DIVERSITY_WEIGHT)
+        self.sqt_use_selector = bool(cfg.MODEL.CASS_SQT_USE_SELECTOR)
+        self.sqt_fusion_weight = float(cfg.MODEL.CASS_SQT_FUSION_WEIGHT)
+        self.sqt_summary_tau = float(cfg.MODEL.CASS_SQT_SUMMARY_TAU)
+        if self.sqt_fusion_weight < 0.0:
+            raise ValueError('CASS_SQT_FUSION_WEIGHT must be >= 0, got {}'.format(
+                self.sqt_fusion_weight))
+        if self.sqt_summary_tau <= 0.0:
+            raise ValueError('CASS_SQT_SUMMARY_TAU must be > 0, got {}'.format(
+                self.sqt_summary_tau))
+        self.sqt_fusion_norm = nn.LayerNorm(dim)
         self.sqt_aux_loss = None
 
     @property
@@ -786,6 +796,21 @@ class CASSModule(nn.Module):
             name: self._token_summary(feat, None if gates is None else gates.get(name))
             for name, feat in token_features.items()
         }
+
+    def _sqt_summary(self, feat, score):
+        patches = feat[:, 1:, :]
+        weight = F.softmax(score.float() / self.sqt_summary_tau, dim=1)
+        summary = (patches.float() * weight.unsqueeze(-1)).sum(dim=1)
+        return self.sqt_fusion_norm(summary).to(dtype=patches.dtype)
+
+    def _apply_sqt_residual(self, fused, enhanced, structure_scores, modality_names):
+        if self.sqt_fusion_weight <= 0.0:
+            return fused
+        out = dict(fused)
+        for idx, name in enumerate(modality_names):
+            out[name] = out[name] + self.sqt_fusion_weight * self._sqt_summary(
+                enhanced[name], structure_scores[idx])
+        return out
 
     @staticmethod
     def _descriptor_from_fused(fused, quality_scores=None):
@@ -863,21 +888,27 @@ class CASSModule(nn.Module):
                 template.device, template.dtype)
             gate_bias = torch.zeros_like(template)
 
-        selected = {}
-        masks = {}
-        gates = {}
-        for idx, name in enumerate(modality_names):
-            modality_idx = MODALITY_ORDER.index(name)
-            alpha = alpha_dyn[:, modality_idx:modality_idx + 1]
-            ratio = keep_ratio[:, modality_idx:modality_idx + 1] if keep_ratio is not None else None
-            quality = quality_scores[:, modality_idx:modality_idx + 1] \
-                if quality_scores is not None else None
-            selected[name], masks[name], gates[name] = self.selector(
-                enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio, quality)
+        if self.sqt_use_selector:
+            selected = {}
+            masks = {}
+            gates = {}
+            for idx, name in enumerate(modality_names):
+                modality_idx = MODALITY_ORDER.index(name)
+                alpha = alpha_dyn[:, modality_idx:modality_idx + 1]
+                ratio = keep_ratio[:, modality_idx:modality_idx + 1] if keep_ratio is not None else None
+                quality = quality_scores[:, modality_idx:modality_idx + 1] \
+                    if quality_scores is not None else None
+                selected[name], masks[name], gates[name] = self.selector(
+                    enhanced[name], self_scores[name], structure_scores[idx], alpha, ratio, quality)
+        else:
+            selected = enhanced
+            masks = self._all_token_masks(selected)
+            gates = None
 
         if self.uses_cagf:
             fused = self.fusion(selected, gate_bias, modality_names, quality_scores=quality_scores)
         else:
             fused = self._summary_dict(selected, gates)
+        fused = self._apply_sqt_residual(fused, enhanced, structure_scores, modality_names)
         descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
         return selected, masks, fused, descriptor

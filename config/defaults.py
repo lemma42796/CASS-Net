@@ -113,6 +113,9 @@ _C.MODEL.CASS_SQT_NUM_QUERIES = 4
 _C.MODEL.CASS_SQT_CLS_QUERY_WEIGHT = 0.5
 _C.MODEL.CASS_SQT_CLS_SCORE_WEIGHT = 0.375
 _C.MODEL.CASS_SQT_DIVERSITY_WEIGHT = 0.01
+_C.MODEL.CASS_SQT_USE_SELECTOR = 1
+_C.MODEL.CASS_SQT_FUSION_WEIGHT = 0.0
+_C.MODEL.CASS_SQT_SUMMARY_TAU = 0.25
 _C.MODEL.CASS_SOFT_RESIDUAL_WEIGHT = 0.2
 _C.MODEL.CASS_HSS_EDGES = 256
 _C.MODEL.CASS_HSS_FILTERS = 128
@@ -252,7 +255,9 @@ _C.SOLVER.AMP_DTYPE = 'bf16'
 # Full training checkpoint for exact continuation. Unlike MODEL.RESUME_PATH,
 # this restores model, optimizer, scheduler, scaler, epoch, RNG, and best metrics.
 _C.SOLVER.RESUME_CHECKPOINT = ''
-_C.SOLVER.SAVE_LATEST_CHECKPOINT = True
+# Keep disk usage low by default. Enable this explicitly only when exact
+# interruption recovery is more important than storage.
+_C.SOLVER.SAVE_LATEST_CHECKPOINT = False
 _C.MODEL.NO_MARGIN = True
 # epoch number of saving checkpoints
 _C.SOLVER.CHECKPOINT_PERIOD = 60

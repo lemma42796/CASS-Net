@@ -26,6 +26,7 @@ Coverage:
   17. Full training checkpoint save -> resume round-trip
   18. AMP dtype selection keeps bf16 unscaled and HSS autocast-safe
  19. SQT fallback alpha and gate-normalized summaries avoid hard SQT-only selection
+ 20. SQT additive summary keeps tokens intact while preserving SQT gradients
 
 Run:
     python3 test_pipeline.py
@@ -196,7 +197,12 @@ def test_three_modal_pipeline(yml):
     # - AL_HEAD/BN: only used when MODEL.AL=1
     # - BACKBONE_HEAD/BN: only used when MODEL.AL=0
     # - BACKBONE.base.fc: ViT's ImageNet classifier, never used (we use embeddings)
-    unused_ok = ('AL_HEAD', 'AL_BN', 'BACKBONE_HEAD', 'BACKBONE_BN', 'BACKBONE.base.fc')
+    # - CASS.nga.topk_mlp: predicts a hard keep count, so the count path is non-differentiable
+    # - CASS.sqt_fusion_norm: only active when CASS_SQT_FUSION_WEIGHT > 0
+    unused_ok = (
+        'AL_HEAD', 'AL_BN', 'BACKBONE_HEAD', 'BACKBONE_BN', 'BACKBONE.base.fc',
+        'CASS.nga.topk_mlp', 'CASS.sqt_fusion_norm',
+    )
     bad = [b for b in bad
            if not (b[1] == 'grad is None' and any(u in b[0] for u in unused_ok))]
     assert not bad, 'gradient issues:\n  ' + '\n  '.join('{} -- {}'.format(*b) for b in bad)
@@ -583,6 +589,43 @@ def test_sqt_fallback_alpha_and_weighted_summary():
     print('     OK')
 
 
+def test_sqt_additive_summary_keeps_tokens():
+    print('[20] SQT additive summary keeps tokens intact')
+    from modeling.fusion_part.CASS import CASSModule
+
+    cfg = _make_cfg(
+        'configs/RGBNT201/default.yml',
+        **{
+            'MODEL.CASS_ABLATION_STAGE': 'hss_sqt',
+            'MODEL.CASS_NUM_HEADS': 4,
+            'MODEL.CASS_HSS_EDGES': 4,
+            'MODEL.CASS_HSS_FILTERS': 8,
+            'MODEL.CASS_SQT_USE_SELECTOR': 0,
+            'MODEL.CASS_SQT_FUSION_WEIGHT': 0.2,
+            'MODEL.CASS_SQT_DIVERSITY_WEIGHT': 0.0,
+        }
+    )
+    cass = CASSModule(dim=24, cfg=cfg, feat_h=2, feat_w=2).to(DEVICE)
+    cass.train()
+    features = {
+        name: torch.randn(BATCH, 5, 24, device=DEVICE)
+        for name in ('RGB', 'NIR', 'TIR')
+    }
+    selected, masks, fused, descriptor = cass(features, epoch=1)
+
+    assert descriptor.shape == (BATCH, 72)
+    for name in ('RGB', 'NIR', 'TIR'):
+        assert selected[name].shape == features[name].shape
+        assert masks[name].all(), '{} mask should keep every token'.format(name)
+        assert fused[name].shape == (BATCH, 24)
+
+    loss = descriptor.sum()
+    loss.backward()
+    grad = cass.sqt.query_token.grad
+    assert grad is not None and torch.isfinite(grad).all()
+    print('     OK')
+
+
 def test_hypergraph_broadcast_matches_diag_math():
     print('[15] Hypergraph broadcast matches diagonal math')
     from modeling.fusion_part.CASS import HypergraphConv2d
@@ -783,6 +826,7 @@ def main():
     test_hss_gate_floor_unblocks_graph_gradients()
     test_hss_structure_score_mix_changes_self_score()
     test_sqt_fallback_alpha_and_weighted_summary()
+    test_sqt_additive_summary_keeps_tokens()
     test_hypergraph_broadcast_matches_diag_math()
     test_resume_weight_loader()
     test_training_checkpoint_roundtrip()
