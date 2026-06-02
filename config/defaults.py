@@ -98,6 +98,8 @@ _C.MODEL.GATE_BALANCE_WEIGHT = 0.0
 # Incremental ablation stage:
 # 'baseline' | 'hss' | 'hss_sqt' | 'hss_sqt_nga' | 'hss_sqt_nga_cagf' | 'full'
 _C.MODEL.CASS_ABLATION_STAGE = 'full'
+_C.MODEL.CASS_DESCRIPTOR_MODE = 'summary'
+_C.MODEL.CASS_CLS_CONTEXT_WEIGHT = 0.0
 _C.MODEL.CASS_NUM_HEADS = 12
 _C.MODEL.CASS_TOPK = 128
 _C.MODEL.CASS_DYNAMIC_TOPK = 1

@@ -176,8 +176,7 @@ class HTLReID(nn.Module):
         self.use_agf = bool(cfg.MODEL.AGF) and not self.use_cass
         self.use_ocfr = bool(cfg.MODEL.OCFR) and not self.use_cass
         self.use_quality = bool(cfg.MODEL.QUALITY_AWARE) and not self.use_cass
-        self.use_cass_quality = (
-            self.use_cass and self.cass_stage == 'full' and bool(cfg.MODEL.CASS_QUALITY_AWARE))
+        self.use_cass_quality = self.use_cass and bool(cfg.MODEL.CASS_QUALITY_AWARE)
         self.use_adapter = bool(cfg.MODEL.MODALITY_ADAPTER) and not self.use_cass
         self.use_part = bool(cfg.MODEL.PART_BRANCH) and not self.use_cass
         self.use_cass_part = (

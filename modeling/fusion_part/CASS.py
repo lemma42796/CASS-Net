@@ -878,6 +878,17 @@ class CASSModule(nn.Module):
         self.feat_w = feat_w
         self.stage = _canonical_stage(getattr(cfg.MODEL, 'CASS_ABLATION_STAGE', 'full'))
         self.stage_rank = CASS_STAGE_RANK[self.stage]
+        self.descriptor_mode = str(
+            getattr(cfg.MODEL, 'CASS_DESCRIPTOR_MODE', 'summary')).strip().lower()
+        if self.descriptor_mode not in ('summary', 'cls'):
+            raise ValueError(
+                "CASS_DESCRIPTOR_MODE must be 'summary' or 'cls', got {}".format(
+                    self.descriptor_mode))
+        self.cls_context_weight = float(
+            getattr(cfg.MODEL, 'CASS_CLS_CONTEXT_WEIGHT', 0.0))
+        if self.cls_context_weight < 0.0:
+            raise ValueError('CASS_CLS_CONTEXT_WEIGHT must be >= 0, got {}'.format(
+                self.cls_context_weight))
         heads = int(cfg.MODEL.CASS_NUM_HEADS)
         self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg)
         self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg)
@@ -961,6 +972,28 @@ class CASSModule(nn.Module):
             for name, feat in token_features.items()
         }
 
+    def _cls_context_summary(self, feat, gate=None):
+        cls_token = feat[:, 0, :]
+        if self.cls_context_weight <= 0.0:
+            return cls_token
+        patches = feat[:, 1:, :]
+        if gate is not None:
+            denom = gate.sum(dim=1, keepdim=True).to(
+                device=patches.device, dtype=patches.dtype).clamp_min(1e-6)
+            context = patches.sum(dim=1) / denom
+        else:
+            context = patches.mean(dim=1)
+        return cls_token + self.cls_context_weight * context
+
+    def _fused_dict(self, token_features, gates=None):
+        if self.descriptor_mode == 'cls':
+            return {
+                name: self._cls_context_summary(
+                    feat, None if gates is None else gates.get(name))
+                for name, feat in token_features.items()
+            }
+        return self._summary_dict(token_features, gates)
+
     def _sqt_summary(self, feat, score):
         patches = feat[:, 1:, :]
         weight = F.softmax(score.float() / self.sqt_summary_tau, dim=1)
@@ -1035,8 +1068,6 @@ class CASSModule(nn.Module):
     def forward(self, features, img_path=None, quality_scores=None, epoch=None):
         self.sqt_aux_loss = None
         modality_names = list(features.keys())
-        if not self.uses_full_design:
-            quality_scores = None
 
         if self.uses_hss:
             enhanced = {}
@@ -1050,7 +1081,7 @@ class CASSModule(nn.Module):
         if not self.uses_sqt:
             selected = enhanced
             masks = self._all_token_masks(selected)
-            fused = self._summary_dict(selected)
+            fused = self._fused_dict(selected)
             descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
             return selected, masks, fused, descriptor
 
@@ -1092,7 +1123,7 @@ class CASSModule(nn.Module):
             masks = self._all_token_masks(selected)
             gates = None
 
-        fused = self._summary_dict(selected, gates)
+        fused = self._fused_dict(selected, gates)
         if self.uses_nga and self.nga_residual_mode == 'cross_mean':
             fused = self._apply_nga_cross_mean_residual(fused, alpha_dyn, modality_names)
         sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
