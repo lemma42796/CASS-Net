@@ -900,6 +900,10 @@ class CASSModule(nn.Module):
         self.sqt_summary_tau = float(cfg.MODEL.CASS_SQT_SUMMARY_TAU)
         self.sqt_agreement_gate = bool(cfg.MODEL.CASS_SQT_AGREEMENT_GATE)
         self.sqt_max_residual_norm = float(cfg.MODEL.CASS_SQT_MAX_RESIDUAL_NORM)
+        self.sqt_learnable_gate = bool(cfg.MODEL.CASS_SQT_LEARNABLE_GATE)
+        self.sqt_gate_init = float(cfg.MODEL.CASS_SQT_GATE_INIT)
+        self.sqt_warmup_epochs = int(cfg.MODEL.CASS_SQT_WARMUP_EPOCHS)
+        self.sqt_ramp_epochs = int(cfg.MODEL.CASS_SQT_RAMP_EPOCHS)
         self.nga_residual_weight = float(cfg.MODEL.CASS_NGA_RESIDUAL_WEIGHT)
         self.nga_residual_mode = str(cfg.MODEL.CASS_NGA_RESIDUAL_MODE).strip().lower()
         if self.sqt_fusion_weight < 0.0:
@@ -911,6 +915,12 @@ class CASSModule(nn.Module):
         if self.sqt_max_residual_norm < 0.0:
             raise ValueError('CASS_SQT_MAX_RESIDUAL_NORM must be >= 0, got {}'.format(
                 self.sqt_max_residual_norm))
+        if self.sqt_warmup_epochs < 0:
+            raise ValueError('CASS_SQT_WARMUP_EPOCHS must be >= 0, got {}'.format(
+                self.sqt_warmup_epochs))
+        if self.sqt_ramp_epochs < 0:
+            raise ValueError('CASS_SQT_RAMP_EPOCHS must be >= 0, got {}'.format(
+                self.sqt_ramp_epochs))
         if self.nga_residual_weight < 0.0:
             raise ValueError('CASS_NGA_RESIDUAL_WEIGHT must be >= 0, got {}'.format(
                 self.nga_residual_weight))
@@ -929,6 +939,8 @@ class CASSModule(nn.Module):
         self.fusion = ContextAwareGatedFusion(dim, num_heads=heads, cfg=cfg) \
             if self.uses_cagf else None
         self.sqt_fusion_norm = nn.LayerNorm(dim) if self.uses_sqt else None
+        self.sqt_residual_gate = nn.Parameter(torch.tensor(self.sqt_gate_init)) \
+            if self.uses_sqt and self.sqt_learnable_gate else None
         self.sqt_aux_loss = None
 
     @property
@@ -1008,6 +1020,23 @@ class CASSModule(nn.Module):
         summary = (patches.float() * weight.unsqueeze(-1)).sum(dim=1)
         return self.sqt_fusion_norm(summary).to(dtype=patches.dtype)
 
+    def _sqt_epoch_scale(self, epoch):
+        if self.sqt_fusion_weight <= 0.0:
+            return 0.0
+        if epoch is None:
+            return 1.0
+        epoch = int(epoch)
+        if epoch <= self.sqt_warmup_epochs:
+            return 0.0
+        if self.sqt_ramp_epochs <= 0:
+            return 1.0
+        return min(1.0, float(epoch - self.sqt_warmup_epochs) / float(self.sqt_ramp_epochs))
+
+    def _sqt_gate_scale(self, device, dtype):
+        if self.sqt_residual_gate is None:
+            return torch.ones((), device=device, dtype=dtype)
+        return torch.sigmoid(self.sqt_residual_gate).to(device=device, dtype=dtype)
+
     def _safe_sqt_residual(self, base, summary, weight):
         residual = weight * summary
         if self.sqt_agreement_gate:
@@ -1023,12 +1052,16 @@ class CASSModule(nn.Module):
             ).to(dtype=residual.dtype)
         return residual
 
-    def _apply_sqt_residual(self, fused, enhanced, structure_scores, modality_names, alpha_dyn=None):
-        if self.sqt_fusion_weight <= 0.0:
+    def _apply_sqt_residual(self, fused, enhanced, structure_scores, modality_names,
+                            alpha_dyn=None, epoch=None):
+        epoch_scale = self._sqt_epoch_scale(epoch)
+        if epoch_scale <= 0.0:
             return fused
         out = dict(fused)
+        template = next(iter(fused.values()))
+        gate_scale = self._sqt_gate_scale(template.device, template.dtype)
         for idx, name in enumerate(modality_names):
-            weight = self.sqt_fusion_weight
+            weight = self.sqt_fusion_weight * epoch_scale * gate_scale
             if alpha_dyn is not None and self.nga_residual_weight > 0.0:
                 modality_idx = MODALITY_ORDER.index(name)
                 alpha = alpha_dyn[:, modality_idx:modality_idx + 1].to(
@@ -1154,7 +1187,7 @@ class CASSModule(nn.Module):
             fused = self._apply_nga_cross_mean_residual(fused, alpha_dyn, modality_names)
         sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
         fused = self._apply_sqt_residual(
-            fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha)
+            fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha, epoch=epoch)
         if self.uses_cagf and self.fusion is not None:
             fused = self.fusion(
                 selected, gate_bias, modality_names,
