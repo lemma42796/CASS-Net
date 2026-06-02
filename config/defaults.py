@@ -224,6 +224,9 @@ _C.SOLVER = CN()
 _C.SOLVER.OPTIMIZER_NAME = "AdamW"
 # Number of max epoches
 _C.SOLVER.MAX_EPOCHS = 120
+# Optional training stop epoch. Keep 0 to train through MAX_EPOCHS while the
+# scheduler still uses MAX_EPOCHS for its schedule.
+_C.SOLVER.TRAIN_EPOCHS = 0
 # Base learning rate
 _C.SOLVER.BASE_LR = 0.0001
 _C.SOLVER.BACKBONE_LR_FACTOR = 0.1

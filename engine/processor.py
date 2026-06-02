@@ -171,10 +171,15 @@ def do_train(cfg,
     eval_period = cfg.SOLVER.EVAL_PERIOD
     save_latest_checkpoint = _cfg_enabled(getattr(cfg.SOLVER, 'SAVE_LATEST_CHECKPOINT', True))
     device = "cuda"
-    epochs = cfg.SOLVER.MAX_EPOCHS
+    scheduler_epochs = int(cfg.SOLVER.MAX_EPOCHS)
+    train_epochs = int(getattr(cfg.SOLVER, 'TRAIN_EPOCHS', 0))
+    epochs = train_epochs if train_epochs > 0 else scheduler_epochs
     logging.getLogger().setLevel(logging.INFO)
     logger = logging.getLogger("HTL-ReID.train")
     logger.info('start training')
+    if train_epochs > 0 and train_epochs != scheduler_epochs:
+        logger.info('Training will stop at epoch {} while scheduler MAX_EPOCHS is {}.'.format(
+            train_epochs, scheduler_epochs))
     # Create SummaryWriter
     writer = SummaryWriter(os.path.join(cfg.OUTPUT_DIR, 'runs'))
 

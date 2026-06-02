@@ -101,6 +101,11 @@ STAGES = {
         ('nga_cagf_agree_query_sqt', 'configs/RGBNT201/sweeps/nga_cagf_agree_query_sqt.yml',
          'A4 repair v3: descriptor agreement CA-GF on query-anchored NGA + SQT additive'),
     ],
+    'full_120sched_20stop': [
+        ('cass_full_cagf_v3_120sched_20stop',
+         'configs/RGBNT201/sweeps/full_cagf_v3_120sched_20stop.yml',
+         'Full CASS v3: MAX_EPOCHS 120 schedule, stop after epoch 20'),
+    ],
     'topk': [
         ('topk_32', 'configs/RGBNT201/sweeps/topk_32.yml', 'CASS_TOPK 32'),
         ('topk_48', 'configs/RGBNT201/sweeps/topk_48.yml', 'CASS_TOPK 48'),
@@ -159,6 +164,7 @@ STAGE_ORDER = [
     'nga_repair_v2',
     'cagf_repair_v2',
     'cagf_agree_v3',
+    'full_120sched_20stop',
     'design',
     'topk',
     'hss_edges',
