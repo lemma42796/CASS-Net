@@ -236,7 +236,7 @@ class R1_mAP():
 
 class R1_mAP_eval():
     def __init__(self, num_query, max_rank=20, feat_norm=True, reranking=False,
-                 rerank_k1=50, rerank_k2=20, rerank_lambda=0.2):
+                 rerank_k1=50, rerank_k2=15, rerank_lambda=0.3):
         super(R1_mAP_eval, self).__init__()
         self.num_query = num_query
         self.max_rank = max_rank

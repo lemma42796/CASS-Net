@@ -302,8 +302,8 @@ _C.TEST.IMS_PER_BATCH = 64
 # If test with re-ranking, options: 'yes','no'
 _C.TEST.RE_RANKING = 'yes'
 _C.TEST.RERANK_K1 = 50
-_C.TEST.RERANK_K2 = 20
-_C.TEST.RERANK_LAMBDA = 0.2
+_C.TEST.RERANK_K2 = 15
+_C.TEST.RERANK_LAMBDA = 0.3
 # Refresh CASS NGA train memory before standalone inference. 'auto' refreshes
 # only for CASS runs with MODEL.CASS_NGA_MEMORY enabled; use 'no' for legacy
 # debugging.
