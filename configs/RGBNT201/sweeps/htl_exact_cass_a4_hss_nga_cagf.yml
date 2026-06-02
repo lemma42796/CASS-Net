@@ -1,5 +1,6 @@
 # A4 on the SQT-free mainline: continue from the strong A3 HSS+NGA best
-# checkpoint and add only a conservative agreement CA-GF refinement.
+# checkpoint and add only a very light agreement CA-GF refinement. A3-best
+# inference probes on RGBNT201 were stable only in this narrow range.
 MODEL:
   METHOD: 'CASS'
   CASS_ABLATION_STAGE: 'hss_nga_cagf'
@@ -16,11 +17,11 @@ MODEL:
   CASS_NGA_RESIDUAL_MODE: 'cross_mean'
   CASS_NGA_RESIDUAL_WEIGHT: 0.10
   CASS_CAGF_MODE: 'agreement'
-  CASS_CAGF_RESIDUAL_WEIGHT: 0.05
-  CASS_CAGF_MIN_AGREE: 0.35
+  CASS_CAGF_RESIDUAL_WEIGHT: 0.03
+  CASS_CAGF_MIN_AGREE: 0.45
   CASS_CAGF_AGREE_TAU: 0.10
-  CASS_CAGF_MAX_GATE: 0.20
-  CASS_CAGF_MAX_RESIDUAL_NORM: 0.12
+  CASS_CAGF_MAX_GATE: 0.10
+  CASS_CAGF_MAX_RESIDUAL_NORM: 0.05
   CASS_CAGF_DETACH_CONTEXT: 1
   CASS_CAGF_WARMUP_EPOCHS: 0
   CASS_CAGF_RAMP_EPOCHS: 2
