@@ -8,13 +8,14 @@ from pytorch_wavelets import DWTForward, DWTInverse
 
 
 class Frequency_based_Token_Selection(nn.Module):
-    def __init__(self, keep,stride=16):
+    def __init__(self, keep, stride=16, quality_aware=True):
         super().__init__()
         self.DWT = DWTForward(J=4, wave='haar', mode='zero')
         self.IDWT = DWTInverse(wave='haar', mode='zero')
         self.keep = keep
         self.window_size = 16
         self.stride = stride
+        self.quality_aware = bool(quality_aware)
 
     # Here, the show function can produce the Fig.4 in the paper.
     def show(self, x, writer=None, epoch=None, img_path=None, mode=1):
@@ -62,21 +63,44 @@ class Frequency_based_Token_Selection(nn.Module):
         selected_tokens_mask.scatter_(1, topk_indices, 1)
         return selected_tokens_mask
 
-    def forward(self, x, y, z, img_path, pattern='a', mode=None, writer=None, step=None):
+    def _modal_weights(self, tensors, quality_scores=None):
+        B = tensors[0].size(0)
+        count = len(tensors)
+        if (not self.quality_aware) or quality_scores is None:
+            return torch.full((B, count), 1.0 / count,
+                              dtype=tensors[0].dtype, device=tensors[0].device)
+        weights = quality_scores[:, :count].to(device=tensors[0].device, dtype=tensors[0].dtype)
+        weights = weights.clamp_min(0.0)
+        return weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+    @staticmethod
+    def _weighted_sum(tensors, weights):
+        out = 0
+        for i, tensor in enumerate(tensors):
+            view_shape = [tensor.size(0)] + [1] * (tensor.dim() - 1)
+            out = out + tensor * weights[:, i].view(*view_shape)
+        return out
+
+    def forward(self, x, y, z, img_path, pattern='a', mode=None, writer=None,
+                step=None, quality_scores=None):
         Ylx, Yhx = self.DWT(x)
         Yly, Yhy = self.DWT(y)
         # You can try to insert the self.show here to reproduce the Fig.4
         if z is not None:
             Ylz, Yhz = self.DWT(z)
-            low = (Ylx+Yly+Ylz)/3
-            high = []
-            for i in range(len(Yhx)):
-                high.append((Yhx[i]+Yhy[i]+Yhz[i])/3)
+            weights = self._modal_weights([Ylx, Yly, Ylz], quality_scores)
+            low = self._weighted_sum([Ylx, Yly, Ylz], weights)
+            high = [
+                self._weighted_sum([Yhx[i], Yhy[i], Yhz[i]], weights)
+                for i in range(len(Yhx))
+            ]
         else:
-            low = (Ylx + Yly) / 2
-            high = []
-            for i in range(len(Yhx)):
-                high.append((Yhx[i] + Yhy[i]) / 2)
+            weights = self._modal_weights([Ylx, Yly], quality_scores)
+            low = self._weighted_sum([Ylx, Yly], weights)
+            high = [
+                self._weighted_sum([Yhx[i], Yhy[i]], weights)
+                for i in range(len(Yhx))
+            ]
 
         Inverse = self.IDWT((low, high))
         selected_tokens_mask = self.mask(Inverse=Inverse, window_size=self.window_size)

@@ -47,6 +47,7 @@ _C.MODEL.AL = 0
 _C.MODEL.HEAD_KEEP = 1
 # The keep tokens in the Frequency Selection Part
 _C.MODEL.FREQUENCY_KEEP=10
+_C.MODEL.FREQUENCY_QUALITY_AWARE = 1
 # HS (Hierarchical Token Selection)
 _C.MODEL.HS_LAYERS = [4, 8, 12]
 _C.MODEL.HS_K = 16
@@ -58,6 +59,10 @@ _C.MODEL.FACSS_MAX_K = 32
 _C.MODEL.FACSS_K_HIDDEN = 192
 _C.MODEL.FACSS_SOFT_RESIDUAL_WEIGHT = 0.15
 _C.MODEL.FACSS_ALPHA_HIDDEN = 192
+_C.MODEL.SELECTED_PATCH_BLEND_WEIGHT = 0.15
+_C.MODEL.SELECTED_PATCH_CONTEXT = 'mean'
+_C.MODEL.SELECTED_PATCH_ATTN_SCALE = 10.0
+_C.MODEL.SELECTED_PATCH_GATE_INIT = 0.0
 # Pooling for cross-modal cosine: 'max' (paper) | 'topk' | 'lse'
 _C.MODEL.FACSS_CROSS_POOL = 'max'
 _C.MODEL.FACSS_CROSS_TOPK = 3
@@ -70,6 +75,8 @@ _C.MODEL.FACSS_NORM = 'minmax'
 # forward is identical to hard top-K, backward routes through softmax of scores.
 _C.MODEL.FACSS_STE = 1
 _C.MODEL.FACSS_STE_TAU = 1.0
+_C.MODEL.FACSS_MODALITY_UNION = 1
+_C.MODEL.FACSS_UNION_PROMOTE = 1
 # OCFR auxiliary loss (not in paper); off by default for paper-faithful reproduction
 _C.MODEL.OCFR = 0
 # Ablation switches (1=enable, 0=disable)

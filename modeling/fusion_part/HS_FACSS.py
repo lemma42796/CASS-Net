@@ -84,6 +84,8 @@ class HSFACSS(nn.Module):
         self.norm_mode = cfg.MODEL.FACSS_NORM
         self.use_ste = bool(cfg.MODEL.FACSS_STE)
         self.ste_tau = float(cfg.MODEL.FACSS_STE_TAU)
+        self.modality_union = bool(cfg.MODEL.FACSS_MODALITY_UNION)
+        self.union_promote = bool(cfg.MODEL.FACSS_UNION_PROMOTE)
 
         hidden = cfg.MODEL.FACSS_ALPHA_HIDDEN
         in_dim = 3 * dim if self.alpha_grain == 'sample' else 4 * dim
@@ -341,6 +343,18 @@ class HSFACSS(nn.Module):
             )
             outs[name] = feat_out
             masks[name] = sel_mask
+
+        if self.modality_union and len(masks) > 1:
+            shared_mask = None
+            for sel_mask in masks.values():
+                shared_mask = sel_mask if shared_mask is None else (shared_mask | sel_mask)
+            if self.union_promote:
+                for name, feat, _, _, _ in modalities:
+                    own_mask = masks[name]
+                    extra_mask = (shared_mask & ~own_mask).unsqueeze(-1)
+                    promoted = torch.where(extra_mask, feat[:, 1:, :], outs[name][:, 1:, :])
+                    outs[name] = torch.cat([outs[name][:, :1, :], promoted], dim=1)
+            masks = {name: shared_mask for name in masks}
 
         # Maintain SFTS-style return tuple ordering for make_model.py.
         if 'TIR' in outs:
