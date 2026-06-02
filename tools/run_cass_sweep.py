@@ -110,6 +110,9 @@ STAGES = {
         ('a3_hss_nga',
          'configs/RGBNT201/sweeps/htl_exact_cass_a3_hss_nga.yml',
          'A3: HTL-exact A0 + HSS + NGA, no SQT'),
+        ('a4_hss_nga_cagf',
+         'configs/RGBNT201/sweeps/htl_exact_cass_a4_hss_nga_cagf.yml',
+         'A4: HTL-exact A3 + agreement CA-GF, no SQT'),
     ],
     'htl_exact_ablation_no_a0': [
         ('a1_hss',
