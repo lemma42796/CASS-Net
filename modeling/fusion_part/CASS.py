@@ -889,12 +889,6 @@ class CASSModule(nn.Module):
         if self.cls_context_weight < 0.0:
             raise ValueError('CASS_CLS_CONTEXT_WEIGHT must be >= 0, got {}'.format(
                 self.cls_context_weight))
-        heads = int(cfg.MODEL.CASS_NUM_HEADS)
-        self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg)
-        self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg)
-        self.nga = NeighborhoodGuidedAdapter(dim, cfg)
-        self.selector = DynamicCollaborativeSelector(cfg)
-        self.fusion = ContextAwareGatedFusion(dim, num_heads=heads, cfg=cfg)
         self.sqt_fallback_alpha = float(cfg.MODEL.CASS_SQT_FALLBACK_ALPHA)
         if self.sqt_fallback_alpha < 0.0 or self.sqt_fallback_alpha > 1.0:
             raise ValueError(
@@ -904,6 +898,8 @@ class CASSModule(nn.Module):
         self.sqt_use_selector = bool(cfg.MODEL.CASS_SQT_USE_SELECTOR)
         self.sqt_fusion_weight = float(cfg.MODEL.CASS_SQT_FUSION_WEIGHT)
         self.sqt_summary_tau = float(cfg.MODEL.CASS_SQT_SUMMARY_TAU)
+        self.sqt_agreement_gate = bool(cfg.MODEL.CASS_SQT_AGREEMENT_GATE)
+        self.sqt_max_residual_norm = float(cfg.MODEL.CASS_SQT_MAX_RESIDUAL_NORM)
         self.nga_residual_weight = float(cfg.MODEL.CASS_NGA_RESIDUAL_WEIGHT)
         self.nga_residual_mode = str(cfg.MODEL.CASS_NGA_RESIDUAL_MODE).strip().lower()
         if self.sqt_fusion_weight < 0.0:
@@ -912,6 +908,9 @@ class CASSModule(nn.Module):
         if self.sqt_summary_tau <= 0.0:
             raise ValueError('CASS_SQT_SUMMARY_TAU must be > 0, got {}'.format(
                 self.sqt_summary_tau))
+        if self.sqt_max_residual_norm < 0.0:
+            raise ValueError('CASS_SQT_MAX_RESIDUAL_NORM must be >= 0, got {}'.format(
+                self.sqt_max_residual_norm))
         if self.nga_residual_weight < 0.0:
             raise ValueError('CASS_NGA_RESIDUAL_WEIGHT must be >= 0, got {}'.format(
                 self.nga_residual_weight))
@@ -919,7 +918,17 @@ class CASSModule(nn.Module):
             raise ValueError(
                 "CASS_NGA_RESIDUAL_MODE must be 'cross_mean' or 'sqt_gate', got {}".format(
                     self.nga_residual_mode))
-        self.sqt_fusion_norm = nn.LayerNorm(dim)
+        heads = int(cfg.MODEL.CASS_NUM_HEADS)
+        self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg) \
+            if self.uses_hss else None
+        self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg) \
+            if self.uses_sqt else None
+        self.nga = NeighborhoodGuidedAdapter(dim, cfg) if self.uses_nga else None
+        self.selector = DynamicCollaborativeSelector(cfg) \
+            if self.uses_sqt and self.sqt_use_selector else None
+        self.fusion = ContextAwareGatedFusion(dim, num_heads=heads, cfg=cfg) \
+            if self.uses_cagf else None
+        self.sqt_fusion_norm = nn.LayerNorm(dim) if self.uses_sqt else None
         self.sqt_aux_loss = None
 
     @property
@@ -943,8 +952,7 @@ class CASSModule(nn.Module):
         return self.stage == 'full'
 
     def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
-        if not self.uses_nga:
-            self.nga.memory_ready = False
+        if not self.uses_nga or self.nga is None:
             return
         self.nga.set_memory(features, keys, modality_names, labels=labels, epoch=epoch)
 
@@ -1000,6 +1008,21 @@ class CASSModule(nn.Module):
         summary = (patches.float() * weight.unsqueeze(-1)).sum(dim=1)
         return self.sqt_fusion_norm(summary).to(dtype=patches.dtype)
 
+    def _safe_sqt_residual(self, base, summary, weight):
+        residual = weight * summary
+        if self.sqt_agreement_gate:
+            cosine = F.cosine_similarity(base.float(), summary.float(), dim=-1).unsqueeze(-1)
+            residual = residual * cosine.clamp_min(0.0).to(dtype=residual.dtype)
+        if self.sqt_max_residual_norm > 0.0:
+            base_norm = base.float().norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            residual_float = residual.float()
+            residual_norm = residual_float.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            max_norm = self.sqt_max_residual_norm * base_norm
+            residual = (
+                residual_float * (max_norm / residual_norm).clamp(max=1.0)
+            ).to(dtype=residual.dtype)
+        return residual
+
     def _apply_sqt_residual(self, fused, enhanced, structure_scores, modality_names, alpha_dyn=None):
         if self.sqt_fusion_weight <= 0.0:
             return fused
@@ -1012,7 +1035,8 @@ class CASSModule(nn.Module):
                     device=fused[name].device, dtype=fused[name].dtype).clamp(0.0, 1.0)
                 weight = weight * (1.0 + self.nga_residual_weight * (2.0 * alpha - 1.0))
                 weight = weight.clamp(0.0, 2.0 * self.sqt_fusion_weight)
-            out[name] = out[name] + weight * self._sqt_summary(enhanced[name], structure_scores[idx])
+            summary = self._sqt_summary(enhanced[name], structure_scores[idx])
+            out[name] = out[name] + self._safe_sqt_residual(out[name], summary, weight)
         return out
 
     def _apply_nga_cross_mean_residual(self, fused, alpha_dyn, modality_names):
@@ -1048,7 +1072,7 @@ class CASSModule(nn.Module):
         return torch.cat(descriptor_parts, dim=-1)
 
     def _base_keep_ratio(self, batch_size, num_tokens, device, dtype):
-        if not self.selector.use_dynamic_topk:
+        if self.selector is None or not self.selector.use_dynamic_topk:
             return None
         min_k, max_k = self.selector._topk_bounds(num_tokens)
         if max_k == min_k:
@@ -1107,6 +1131,8 @@ class CASSModule(nn.Module):
             gate_bias = torch.zeros_like(template)
 
         if self.sqt_use_selector:
+            if self.selector is None:
+                raise RuntimeError('CASS SQT selector is enabled but was not constructed')
             selected = {}
             masks = {}
             gates = {}
@@ -1129,7 +1155,7 @@ class CASSModule(nn.Module):
         sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
         fused = self._apply_sqt_residual(
             fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha)
-        if self.uses_cagf:
+        if self.uses_cagf and self.fusion is not None:
             fused = self.fusion(
                 selected, gate_bias, modality_names,
                 quality_scores=quality_scores, base_fused=fused, epoch=epoch)

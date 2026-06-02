@@ -364,14 +364,15 @@ class HTLReID(nn.Module):
         if (not self.use_cass_memory) or train_loader is None:
             return
         cass = getattr(self, 'CASS', None)
-        if cass is not None and hasattr(cass, 'uses_nga') and not cass.uses_nga:
-            if getattr(cass.nga, 'memory_ready', False):
-                cass.nga.memory_ready = False
+        nga = getattr(cass, 'nga', None)
+        if cass is not None and hasattr(cass, 'uses_nga') and (
+                not cass.uses_nga or nga is None):
+            if nga is not None and getattr(nga, 'memory_ready', False):
+                nga.memory_ready = False
             if logger is not None:
                 logger.info('Skipped CASS NGA memory refresh for ablation stage {}'.format(
                     getattr(cass, 'stage', 'unknown')))
             return
-        nga = getattr(getattr(self, 'CASS', None), 'nga', None)
         warmup_epochs = int(getattr(nga, 'memory_warmup_epochs', 0)) if nga is not None else 0
         if epoch is not None and int(epoch) <= warmup_epochs:
             if nga is not None:
@@ -408,7 +409,7 @@ class HTLReID(nn.Module):
             memory = torch.cat(memory_chunks, dim=0)
             self.CASS.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'], labels=labels, epoch=epoch)
             if logger is not None:
-                if self.CASS.nga.memory_ready:
+                if nga is not None and nga.memory_ready:
                     logger.info('Refreshed CASS NGA memory: {} samples'.format(memory.size(0)))
                 else:
                     logger.info('Skipped CASS NGA memory refresh during warmup')
