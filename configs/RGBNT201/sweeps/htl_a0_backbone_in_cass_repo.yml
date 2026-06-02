@@ -1,0 +1,29 @@
+# HTL A0 reproduced inside this checkout: shared ViT raw CLS concat.
+# This bypasses CASSModule entirely so it can diagnose whether the A0 gap comes
+# from the CASS path or from the shared training/data/evaluation stack.
+MODEL:
+  METHOD: 'HTL'
+  HS_K: 999
+  FACSS_DYNAMIC_K: 0
+  FACSS_K: 999
+  FACSS_MIN_K: 999
+  FACSS_MAX_K: 999
+  FACSS_SOFT_RESIDUAL_WEIGHT: 0.0
+  QUALITY_AWARE: 0
+  AGF: 0
+  MODALITY_ADAPTER: 0
+  PART_BRANCH: 0
+  ALIGN_LOSS_WEIGHT: 0.0
+  TOKEN_CONSISTENCY_WEIGHT: 0.0
+  GATE_BALANCE_WEIGHT: 0.0
+  AL: 1
+INPUT:
+  MODALITY_DROP_PROB: 0.0
+DATALOADER:
+  NUM_INSTANCE: 8
+SOLVER:
+  IMS_PER_BATCH: 40
+  MAX_EPOCHS: 120
+  TRAIN_EPOCHS: 20
+  AMP: True
+  AMP_DTYPE: 'bf16'
