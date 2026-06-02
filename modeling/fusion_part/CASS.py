@@ -929,16 +929,12 @@ class CASSModule(nn.Module):
                 "CASS_NGA_RESIDUAL_MODE must be 'cross_mean' or 'sqt_gate', got {}".format(
                     self.nga_residual_mode))
         heads = int(cfg.MODEL.CASS_NUM_HEADS)
-        self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg) \
-            if self.uses_hss else None
-        self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg) \
-            if self.uses_sqt else None
-        self.nga = NeighborhoodGuidedAdapter(dim, cfg) if self.uses_nga else None
-        self.selector = DynamicCollaborativeSelector(cfg) \
-            if self.uses_sqt and self.sqt_use_selector else None
-        self.fusion = ContextAwareGatedFusion(dim, num_heads=heads, cfg=cfg) \
-            if self.uses_cagf else None
-        self.sqt_fusion_norm = nn.LayerNorm(dim) if self.uses_sqt else None
+        self.hss = HighOrderStructureSynergy(dim, feat_h, feat_w, cfg)
+        self.sqt = SynergyQueryToken(dim, num_heads=heads, cfg=cfg)
+        self.nga = NeighborhoodGuidedAdapter(dim, cfg)
+        self.selector = DynamicCollaborativeSelector(cfg)
+        self.fusion = ContextAwareGatedFusion(dim, num_heads=heads, cfg=cfg)
+        self.sqt_fusion_norm = nn.LayerNorm(dim)
         self.sqt_residual_gate = nn.Parameter(torch.tensor(self.sqt_gate_init)) \
             if self.uses_sqt and self.sqt_learnable_gate else None
         self.sqt_aux_loss = None
@@ -964,7 +960,8 @@ class CASSModule(nn.Module):
         return self.stage == 'full'
 
     def set_memory(self, features, keys, modality_names, labels=None, epoch=None):
-        if not self.uses_nga or self.nga is None:
+        if not self.uses_nga:
+            self.nga.memory_ready = False
             return
         self.nga.set_memory(features, keys, modality_names, labels=labels, epoch=epoch)
 
