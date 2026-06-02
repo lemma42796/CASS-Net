@@ -100,12 +100,14 @@ def main():
         required=True,
         help="Config file passed to test_net.py; repeat to chain merges.",
     )
-    parser.add_argument("--checkpoint", required=True, type=str)
+    parser.add_argument("--checkpoint", "--weight", dest="checkpoint", required=True, type=str)
     parser.add_argument("--output_dir", required=True, type=str)
     parser.add_argument("--python", default=sys.executable, type=str)
     parser.add_argument("--k1", default="40,45,50,55", type=str)
     parser.add_argument("--k2", default="15,20", type=str)
-    parser.add_argument("--lambda_values", default="0.08,0.10,0.12,0.15", type=str)
+    parser.add_argument(
+        "--lambda_values", "--lambda-values", dest="lambda_values",
+        default="0.08,0.10,0.12,0.15", type=str)
     parser.add_argument("--continue_on_error", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument(
@@ -114,7 +116,8 @@ def main():
         default=[],
         help="Extra cfg overrides passed to test_net.py",
     )
-    args = parser.parse_args()
+    args, trailing_opts = parser.parse_known_args()
+    args.opts.extend(trailing_opts)
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     test_script = os.path.join(repo_root, "test_net.py")
