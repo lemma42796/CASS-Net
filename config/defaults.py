@@ -108,7 +108,8 @@ _C.MODEL.AUX_WARMUP_EPOCHS = 40
 
 # CASS-Net (chapter 4): HSS + SQT + NGA + CA-GF
 # Incremental ablation stage:
-# 'baseline' | 'hss' | 'hss_sqt' | 'hss_sqt_nga' | 'hss_sqt_nga_cagf' | 'full'
+# 'baseline' | 'hss' | 'hss_nga' | 'hss_nga_cagf' |
+# 'hss_sqt' | 'hss_sqt_nga' | 'hss_sqt_nga_cagf' | 'full'
 _C.MODEL.CASS_ABLATION_STAGE = 'full'
 _C.MODEL.CASS_DESCRIPTOR_MODE = 'summary'
 _C.MODEL.CASS_CLS_CONTEXT_WEIGHT = 0.0

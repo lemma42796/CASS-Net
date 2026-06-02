@@ -106,6 +106,11 @@ STAGES = {
          'configs/RGBNT201/sweeps/full_cagf_v3_120sched_20stop.yml',
          'Full CASS v3: MAX_EPOCHS 120 schedule, stop after epoch 20'),
     ],
+    'htl_exact_no_sqt_mainline': [
+        ('a3_hss_nga',
+         'configs/RGBNT201/sweeps/htl_exact_cass_a3_hss_nga.yml',
+         'A3: HTL-exact A0 + HSS + NGA, no SQT'),
+    ],
     'htl_exact_ablation_no_a0': [
         ('a1_hss',
          'configs/RGBNT201/sweeps/htl_exact_cass_a1_hss.yml',
@@ -179,6 +184,7 @@ STAGE_ORDER = [
     'cagf_repair_v2',
     'cagf_agree_v3',
     'full_120sched_20stop',
+    'htl_exact_no_sqt_mainline',
     'htl_exact_ablation_no_a0',
     'design',
     'topk',

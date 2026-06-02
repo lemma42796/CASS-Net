@@ -10,12 +10,24 @@ PAIR_ORDER = ((0, 1), (0, 2), (1, 2))
 CASS_ABLATION_STAGES = (
     'baseline',
     'hss',
+    'hss_nga',
+    'hss_nga_cagf',
     'hss_sqt',
     'hss_sqt_nga',
     'hss_sqt_nga_cagf',
     'full',
 )
 CASS_STAGE_RANK = {name: idx for idx, name in enumerate(CASS_ABLATION_STAGES)}
+CASS_STAGE_FEATURES = {
+    'baseline': (),
+    'hss': ('hss',),
+    'hss_nga': ('hss', 'nga'),
+    'hss_nga_cagf': ('hss', 'nga', 'cagf'),
+    'hss_sqt': ('hss', 'sqt'),
+    'hss_sqt_nga': ('hss', 'sqt', 'nga'),
+    'hss_sqt_nga_cagf': ('hss', 'sqt', 'nga', 'cagf'),
+    'full': ('hss', 'sqt', 'nga', 'cagf'),
+}
 
 
 def _canonical_stage(stage):
@@ -23,6 +35,9 @@ def _canonical_stage(stage):
     aliases = {
         'none': 'baseline',
         'base': 'baseline',
+        'hss+nga': 'hss_nga',
+        'hss+nga+cagf': 'hss_nga_cagf',
+        'hss_nga_ca_gf': 'hss_nga_cagf',
         'hss+sqt': 'hss_sqt',
         'hss+sqt+nga': 'hss_sqt_nga',
         'hss+sqt+nga+cagf': 'hss_sqt_nga_cagf',
@@ -941,19 +956,19 @@ class CASSModule(nn.Module):
 
     @property
     def uses_hss(self):
-        return self.stage_rank >= CASS_STAGE_RANK['hss']
+        return 'hss' in CASS_STAGE_FEATURES[self.stage]
 
     @property
     def uses_sqt(self):
-        return self.stage_rank >= CASS_STAGE_RANK['hss_sqt']
+        return 'sqt' in CASS_STAGE_FEATURES[self.stage]
 
     @property
     def uses_nga(self):
-        return self.stage_rank >= CASS_STAGE_RANK['hss_sqt_nga']
+        return 'nga' in CASS_STAGE_FEATURES[self.stage]
 
     @property
     def uses_cagf(self):
-        return self.stage_rank >= CASS_STAGE_RANK['hss_sqt_nga_cagf']
+        return 'cagf' in CASS_STAGE_FEATURES[self.stage]
 
     @property
     def uses_full_design(self):
@@ -1132,24 +1147,21 @@ class CASSModule(nn.Module):
             enhanced = dict(features)
             self_scores = {}
 
-        if not self.uses_sqt:
-            selected = enhanced
-            masks = self._all_token_masks(selected)
-            fused = self._fused_dict(selected)
-            descriptor = self._descriptor_from_fused(fused, quality_scores=quality_scores)
-            return selected, masks, fused, descriptor
-
-        enhanced_list = [enhanced[name] for name in modality_names]
-        structure_scores, _, sqt_diversity = self.sqt(enhanced_list)
-        self.sqt_aux_loss = self.sqt_diversity_weight * sqt_diversity
         cls_list = [features[name][:, 0, :] for name in modality_names]
         if quality_scores is not None:
             template = cls_list[0]
             quality_scores = quality_scores.to(device=template.device, dtype=template.dtype)
+
+        structure_scores = None
+        if self.uses_sqt:
+            enhanced_list = [enhanced[name] for name in modality_names]
+            structure_scores, _, sqt_diversity = self.sqt(enhanced_list)
+            self.sqt_aux_loss = self.sqt_diversity_weight * sqt_diversity
+
         if self.uses_nga:
             alpha_dyn, keep_ratio, gate_bias, _ = self.nga(
                 cls_list, modality_names, keys=img_path, quality_scores=quality_scores)
-        else:
+        elif self.uses_sqt:
             template = cls_list[0]
             alpha_dyn = torch.full(
                 (template.size(0), len(MODALITY_ORDER)),
@@ -1159,8 +1171,13 @@ class CASSModule(nn.Module):
                 template.size(0), enhanced_list[0].size(1) - 1,
                 template.device, template.dtype)
             gate_bias = torch.zeros_like(template)
+        else:
+            template = cls_list[0]
+            alpha_dyn = None
+            keep_ratio = None
+            gate_bias = torch.zeros_like(template)
 
-        if self.sqt_use_selector:
+        if self.uses_sqt and self.sqt_use_selector:
             if self.selector is None:
                 raise RuntimeError('CASS SQT selector is enabled but was not constructed')
             selected = {}
@@ -1182,9 +1199,10 @@ class CASSModule(nn.Module):
         fused = self._fused_dict(selected, gates)
         if self.uses_nga and self.nga_residual_mode == 'cross_mean':
             fused = self._apply_nga_cross_mean_residual(fused, alpha_dyn, modality_names)
-        sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
-        fused = self._apply_sqt_residual(
-            fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha, epoch=epoch)
+        if self.uses_sqt:
+            sqt_alpha = alpha_dyn if self.uses_nga and self.nga_residual_mode == 'sqt_gate' else None
+            fused = self._apply_sqt_residual(
+                fused, enhanced, structure_scores, modality_names, alpha_dyn=sqt_alpha, epoch=epoch)
         if self.uses_cagf and self.fusion is not None:
             fused = self.fusion(
                 selected, gate_bias, modality_names,
