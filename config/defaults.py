@@ -268,6 +268,9 @@ _C.SOLVER.WARMUP_FACTOR = 0.01
 _C.SOLVER.WARMUP_ITERS = 20
 # method of warm up, option: 'constant','linear'
 _C.SOLVER.WARMUP_METHOD = "linear"
+# Scheduler step unit. CASS keeps the historical epoch schedule by default;
+# HTL reproduction overlays can select iteration to match the HTL codebase.
+_C.SOLVER.SCHEDULER_UNIT = "epoch"
 
 _C.SOLVER.COSINE_MARGIN = 0.5
 _C.SOLVER.COSINE_SCALE = 30

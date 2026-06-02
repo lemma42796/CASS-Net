@@ -82,7 +82,7 @@ if __name__ == '__main__':
 
     optimizer, optimizer_center = make_optimizer(cfg, model, center_criterion)
 
-    scheduler = create_scheduler(cfg, optimizer)
+    scheduler = create_scheduler(cfg, optimizer, num_batches=len(train_loader))
     do_train(
         cfg,
         model,

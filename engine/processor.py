@@ -242,6 +242,8 @@ def do_train(cfg,
             float(cfg.MODEL.AUX_LOSS_WEIGHT),
         ))
     scaler = _cuda_grad_scaler(enabled=scaler_enabled)
+    scheduler_in_epochs = getattr(scheduler, 't_in_epochs', True)
+    updates_per_epoch = len(train_loader)
 
     best_index = {'mAP': 0, "Rank-1": 0, 'Rank-5': 0, 'Rank-10': 0}
     start_epoch = 1
@@ -271,7 +273,8 @@ def do_train(cfg,
         loss_meter.reset()
         evaluator_m.reset()
         acc_meter.reset()
-        scheduler.step(epoch)
+        if scheduler_in_epochs:
+            scheduler.step(epoch)
         model_for_memory = model.module if hasattr(model, 'module') else model
         hss = getattr(getattr(model_for_memory, 'CASS', None), 'hss', None)
         if hss is not None and hasattr(hss, 'current_graph_weight'):
@@ -294,6 +297,9 @@ def do_train(cfg,
                 train_loader_normal, device=device, logger=logger, epoch=epoch)
         model.train()
         for n_iter, (img, vid, target_cam, target_view, imgpath) in enumerate(train_loader):
+            if not scheduler_in_epochs:
+                num_updates = (epoch - 1) * updates_per_epoch + n_iter
+                scheduler.step_update(num_updates)
             optimizer.zero_grad()
             optimizer_center.zero_grad()
             img = {'RGB': img['RGB'].to(device),
@@ -337,7 +343,7 @@ def do_train(cfg,
                 # print(scheduler._get_lr(epoch))
                 logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
                             .format(epoch, (n_iter + 1), len(train_loader),
-                                    loss_meter.avg, acc_meter.avg, scheduler._get_lr(epoch)[0]))
+                                    loss_meter.avg, acc_meter.avg, optimizer.param_groups[0]['lr']))
 
         end_time = time.time()
         time_per_batch = (end_time - start_time) / (n_iter + 1)

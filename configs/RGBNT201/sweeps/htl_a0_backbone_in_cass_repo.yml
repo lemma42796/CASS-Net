@@ -28,3 +28,4 @@ SOLVER:
   TRAIN_EPOCHS: 20
   AMP: True
   AMP_DTYPE: 'fp16'
+  SCHEDULER_UNIT: 'iteration'
