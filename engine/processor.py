@@ -121,9 +121,27 @@ def _cuda_grad_scaler(enabled):
     return amp.GradScaler(enabled=enabled)
 
 
+def _stage_scale(epoch, warmup_epochs):
+    warmup_epochs = int(warmup_epochs)
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(1.0, float(epoch) / float(warmup_epochs))
+
+
 def _branch_loss_weights(cfg, num_pairs):
     if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() != 'CASS':
-        return [1.0] * num_pairs
+        if num_pairs <= 0:
+            return []
+        fused_weight = float(getattr(cfg.MODEL, 'FUSE_LOSS_WEIGHT', 1.0))
+        branch_weight = float(getattr(cfg.MODEL, 'BRANCH_LOSS_WEIGHT', 0.5))
+        part_weight = float(getattr(cfg.MODEL, 'PART_LOSS_WEIGHT', 0.25))
+        weights = [fused_weight]
+        if bool(getattr(cfg.MODEL, 'PART_BRANCH', 0)) and num_pairs > 1:
+            weights.extend([branch_weight] * max(num_pairs - 2, 0))
+            weights.append(part_weight)
+        else:
+            weights.extend([branch_weight] * (num_pairs - 1))
+        return weights
 
     fused_weight = float(getattr(cfg.MODEL, 'CASS_FUSED_LOSS_WEIGHT', 1.0))
     modal_weight = float(getattr(cfg.MODEL, 'CASS_MODAL_LOSS_WEIGHT', 1.0))
@@ -216,6 +234,13 @@ def do_train(cfg,
             float(cfg.MODEL.CASS_MODAL_LOSS_WEIGHT),
             float(cfg.MODEL.CASS_PART_LOSS_WEIGHT),
         ))
+    else:
+        logger.info('HTL branch loss weights: fused {:.3f}, branch {:.3f}, part {:.3f}, aux {:.3f}'.format(
+            float(cfg.MODEL.FUSE_LOSS_WEIGHT),
+            float(cfg.MODEL.BRANCH_LOSS_WEIGHT),
+            float(cfg.MODEL.PART_LOSS_WEIGHT),
+            float(cfg.MODEL.AUX_LOSS_WEIGHT),
+        ))
     scaler = _cuda_grad_scaler(enabled=scaler_enabled)
 
     best_index = {'mAP': 0, "Rank-1": 0, 'Rank-5': 0, 'Rank-10': 0}
@@ -287,7 +312,12 @@ def do_train(cfg,
                     loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
                     loss = loss + branch_weights[pair_idx] * loss_tmp
                 if len(output) % 2 == 1:
-                    loss = loss + output[-1]
+                    if getattr(cfg.MODEL, 'METHOD', 'HTL').upper() == 'CASS':
+                        loss = loss + output[-1]
+                    else:
+                        aux_weight = float(cfg.MODEL.AUX_LOSS_WEIGHT) * _stage_scale(
+                            epoch, cfg.MODEL.AUX_WARMUP_EPOCHS)
+                        loss = loss + aux_weight * output[-1]
             writer.add_scalar('Loss', loss.item(), epoch)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
