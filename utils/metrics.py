@@ -39,7 +39,7 @@ def eval_func_msrv(distmat, q_pids, g_pids, q_camids, g_camids, q_sceneids, g_sc
     query_arg = np.argsort(q_pids, axis=0)
     result = g_pids[indices]
     gall_re = result[query_arg]
-    gall_re = gall_re.astype(np.str)
+    gall_re = gall_re.astype(str)
     # pdb.set_trace()
 
     result = gall_re[:, :100]
