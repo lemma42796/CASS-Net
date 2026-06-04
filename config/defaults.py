@@ -226,6 +226,15 @@ _C.DATASETS = CN()
 _C.DATASETS.NAMES = ('RGBNT201')
 # Root directory where datasets should be used (and downloaded if not found)
 _C.DATASETS.ROOT_DIR = ('./data')
+# Number of modalities per training sample. RGBNT/MSVR use 3; SYSU-MM01 and
+# RegDB use paired visible/infrared samples.
+_C.DATASETS.MODALITIES = 3
+# If enabled, validation/inference extracts single visible or infrared branch
+# features using the modality marker stored in each sample.
+_C.DATASETS.CROSS_MODAL_EVAL = False
+_C.DATASETS.SYSU_EVAL_MODE = 'all'
+_C.DATASETS.REGDB_SPLIT = 1
+_C.DATASETS.REGDB_QUERY_MODALITY = 'thermal'
 # -----------------------------------------------------------------------------
 # DataLoader
 # -----------------------------------------------------------------------------

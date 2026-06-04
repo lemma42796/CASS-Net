@@ -166,6 +166,7 @@ class HTLReID(nn.Module):
         self.method = cfg.MODEL.METHOD.upper()
         self.use_cass = self.method == 'CASS'
         self.cass_stage = str(getattr(cfg.MODEL, 'CASS_ABLATION_STAGE', 'full')).strip().lower()
+        self.num_modalities = int(getattr(cfg.DATASETS, 'MODALITIES', 3))
         if self.use_cass:
             self.CASS = CASSModule(dim=self.BACKBONE.token_dim, cfg=cfg,
                                    feat_h=self.feat_h, feat_w=self.feat_w)
@@ -390,24 +391,33 @@ class HTLReID(nn.Module):
                 img = {
                     'RGB': img['RGB'].to(device),
                     'NI': img['NI'].to(device),
-                    'TI': img['TI'].to(device),
                 }
+                if self.num_modalities >= 3:
+                    img['TI'] = img['TI'].to(device)
                 camids = camids.to(device)
                 target_view = target_view.to(device)
                 rgb_feat, _ = self.BACKBONE(img['RGB'], cam_label=camids, view_label=target_view)
                 nir_feat, _ = self.BACKBONE(img['NI'], cam_label=camids, view_label=target_view)
-                tir_feat, _ = self.BACKBONE(img['TI'], cam_label=camids, view_label=target_view)
-                cls = torch.stack([
-                    rgb_feat[:, 0, :],
-                    nir_feat[:, 0, :],
-                    tir_feat[:, 0, :],
-                ], dim=1)
+                if self.num_modalities >= 3:
+                    tir_feat, _ = self.BACKBONE(img['TI'], cam_label=camids, view_label=target_view)
+                    cls = torch.stack([
+                        rgb_feat[:, 0, :],
+                        nir_feat[:, 0, :],
+                        tir_feat[:, 0, :],
+                    ], dim=1)
+                    modality_names = ['RGB', 'NIR', 'TIR']
+                else:
+                    cls = torch.stack([
+                        rgb_feat[:, 0, :],
+                        nir_feat[:, 0, :],
+                    ], dim=1)
+                    modality_names = ['RGB', 'NIR']
                 memory_chunks.append(cls.cpu())
                 keys.extend([str(p) for p in img_paths])
                 labels.extend([int(p) for p in pids])
         if memory_chunks:
             memory = torch.cat(memory_chunks, dim=0)
-            self.CASS.set_memory(memory, keys, ['RGB', 'NIR', 'TIR'], labels=labels, epoch=epoch)
+            self.CASS.set_memory(memory, keys, modality_names, labels=labels, epoch=epoch)
             if logger is not None:
                 if nga is not None and nga.memory_ready:
                     logger.info('Refreshed CASS NGA memory: {} samples'.format(memory.size(0)))
@@ -440,8 +450,48 @@ class HTLReID(nn.Module):
         if missing_keys:
             print('  Missing keys (randomly initialized): {}'.format(missing_keys))
 
+    def extract_cross_modal_feature(self, x, modality_label=None, cam_label=None, view_label=None,
+                                    img_path=None, epoch=None):
+        RGB = x['RGB']
+        NIR = x['NI']
+        RGB_feat, _ = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label)
+        NIR_feat, _ = self.BACKBONE(NIR, cam_label=cam_label, view_label=view_label)
+        RGB_feat, NIR_feat, _ = self._adapt_features(RGB_feat, NIR_feat, None)
+        if self.use_cass:
+            quality_scores = self.QUALITY_HEAD(RGB_feat[:, 0, :], NIR_feat[:, 0, :], None) \
+                if self.use_cass_quality else None
+            _, _, _, rgb_cls, nir_cls, _ = self._cass_forward_from_features(
+                RGB_feat, NIR_feat, None, img_path=img_path,
+                quality_scores=quality_scores, epoch=epoch)
+        else:
+            rgb_cls = RGB_feat[:, 0, :]
+            nir_cls = NIR_feat[:, 0, :]
+
+        if modality_label is None:
+            return rgb_cls
+        modality_label = modality_label.to(device=rgb_cls.device).view(-1)
+        out = torch.empty_like(rgb_cls)
+        rgb_mask = modality_label == 0
+        nir_mask = modality_label == 1
+        other_mask = ~(rgb_mask | nir_mask)
+        if rgb_mask.any():
+            out[rgb_mask] = rgb_cls[rgb_mask]
+        if nir_mask.any():
+            out[nir_mask] = nir_cls[nir_mask]
+        if other_mask.any():
+            out[other_mask] = rgb_cls[other_mask]
+        return out
+
     def forward(self, x, cam_label=None, label=None, view_label=None, img_path=None, mode=1,
-                writer=None, epoch=None):
+                writer=None, epoch=None, cross_type=None, modality_label=None):
+        if cross_type == 'two_modal':
+            return self.forward_two_modalities(
+                x, cam_label=cam_label, label=label, view_label=view_label,
+                img_path=img_path, mode=mode, writer=writer, epoch=epoch)
+        if cross_type == 'cross_modal_eval':
+            return self.extract_cross_modal_feature(
+                x, modality_label=modality_label, cam_label=cam_label,
+                view_label=view_label, img_path=img_path, epoch=epoch)
         if self.training:
             RGB = x['RGB']
             NIR = x['NI']

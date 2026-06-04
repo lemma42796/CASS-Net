@@ -53,6 +53,18 @@ YMLS = [
     'configs/Market1501-MM/default.yml',
     'configs/MSVR310/default.yml',
     'configs/RGBNT100/default.yml',
+    'configs/SYSU-MM01/default.yml',
+    'configs/RegDB/default.yml',
+]
+THREE_MODAL_YMLS = [
+    'configs/RGBNT201/default.yml',
+    'configs/Market1501-MM/default.yml',
+    'configs/MSVR310/default.yml',
+    'configs/RGBNT100/default.yml',
+]
+TWO_MODAL_YMLS = [
+    'configs/SYSU-MM01/default.yml',
+    'configs/RegDB/default.yml',
 ]
 
 NUM_CLASSES = 8
@@ -247,6 +259,85 @@ def test_two_modal_pipeline():
         cls_eval = model.forward_two_modalities(x, cam_label=None, epoch=0)
     assert cls_eval.shape == (BATCH, 3 * model.BACKBONE.token_dim)
     print('     eval fwd OK')
+
+
+def test_two_modal_configs():
+    print('[4b] 2-modal dataset configs route through model.forward')
+    for yml in TWO_MODAL_YMLS:
+        cfg = _make_cfg(yml, **{'MODEL.AL': 0})
+        cfg.DATASETS.MODALITIES = 2
+        cfg.DATASETS.CROSS_MODAL_EVAL = True
+        model = make_model(cfg, num_class=NUM_CLASSES, camera_num=0).to(DEVICE)
+        model.train()
+        x = _dummy_batch(cfg, modalities=('RGB', 'NI'))
+        label = torch.randint(0, NUM_CLASSES, (BATCH,), device=DEVICE)
+        output = model(x, cam_label=None, label=label, epoch=0, cross_type='two_modal')
+        expected_len = _expected_train_outputs(cfg, modalities=2)
+        assert len(output) == expected_len, '{} expected {} outputs, got {}'.format(
+            yml, expected_len, len(output))
+        loss = _loss_assembly_like_processor(output)
+        loss.backward()
+
+        model.eval()
+        modality = torch.tensor([0, 1], device=DEVICE)
+        with torch.no_grad():
+            feat = model(
+                x, cam_label=None, view_label=modality, epoch=0,
+                cross_type='cross_modal_eval', modality_label=modality)
+        assert feat.shape == (BATCH, model.BACKBONE.token_dim)
+        _assert_finite(feat, '{} cross-modal feat'.format(yml))
+        print('     OK: {}'.format(yml))
+
+
+def test_cross_modal_dataset_loaders():
+    print('[4c] SYSU-MM01 and RegDB dataset loader contracts')
+    import tempfile
+    from pathlib import Path
+    from PIL import Image
+    from data.datasets.sysumm01 import SYSUMM01
+    from data.datasets.regdb import RegDB
+
+    def write_img(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new('RGB', (16, 16), color=(123, 45, 67)).save(str(path))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sysu = root / 'SYSU-MM01'
+        (sysu / 'exp').mkdir(parents=True)
+        (sysu / 'exp' / 'train_id.txt').write_text('1\n')
+        (sysu / 'exp' / 'val_id.txt').write_text('')
+        (sysu / 'exp' / 'test_id.txt').write_text('2\n')
+        for cam in range(1, 7):
+            pid = '0001' if cam in (1, 2, 3, 4, 5, 6) else '0002'
+            write_img(sysu / 'cam{}'.format(cam) / pid / '0001.jpg')
+        for cam in range(1, 7):
+            write_img(sysu / 'cam{}'.format(cam) / '0002' / '0001.jpg')
+        cfg = _make_cfg('configs/SYSU-MM01/default.yml')
+        cfg.DATASETS.SYSU_EVAL_MODE = 'indoor'
+        dataset = SYSUMM01(root=str(root), cfg=cfg, verbose=False)
+        assert dataset.train and dataset.query and dataset.gallery
+        assert isinstance(dataset.train[0][0], list) and len(dataset.train[0][0]) == 2
+        assert dataset.query[0][3] == 1
+        assert dataset.gallery[0][3] == 0
+
+        regdb = root / 'RegDB'
+        (regdb / 'idx').mkdir(parents=True)
+        write_img(regdb / 'visible' / '001.jpg')
+        write_img(regdb / 'thermal' / '001.jpg')
+        write_img(regdb / 'visible' / '002.jpg')
+        write_img(regdb / 'thermal' / '002.jpg')
+        (regdb / 'idx' / 'train_visible_1.txt').write_text('visible/001.jpg 1\n')
+        (regdb / 'idx' / 'train_infrared_1.txt').write_text('thermal/001.jpg 1\n')
+        (regdb / 'idx' / 'test_visible_1.txt').write_text('visible/002.jpg 2\n')
+        (regdb / 'idx' / 'test_infrared_1.txt').write_text('thermal/002.jpg 2\n')
+        cfg = _make_cfg('configs/RegDB/default.yml')
+        dataset = RegDB(root=str(root), cfg=cfg, verbose=False)
+        assert dataset.train and dataset.query and dataset.gallery
+        assert isinstance(dataset.train[0][0], list) and len(dataset.train[0][0]) == 2
+        assert dataset.query[0][3] == 1
+        assert dataset.gallery[0][3] == 0
+    print('     OK')
 
 
 def test_save_load_roundtrip():
@@ -1030,9 +1121,11 @@ def main():
     print('Using test device: {}'.format(DEVICE))
     test_defaults_load()
     test_yml_configs_merge()
-    for y in YMLS:
+    for y in THREE_MODAL_YMLS:
         test_three_modal_pipeline(y)
     test_two_modal_pipeline()
+    test_two_modal_configs()
+    test_cross_modal_dataset_loaders()
     test_save_load_roundtrip()
     test_timm_pretrain_source_loader()
     test_local_pretrain_source_loader()

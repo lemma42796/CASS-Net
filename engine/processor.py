@@ -17,6 +17,47 @@ def _cfg_enabled(value):
     return bool(value)
 
 
+def _is_two_modal(cfg):
+    return int(getattr(cfg.DATASETS, 'MODALITIES', 3)) == 2
+
+
+def _is_cross_modal_eval(cfg):
+    return _cfg_enabled(getattr(cfg.DATASETS, 'CROSS_MODAL_EVAL', False))
+
+
+def _prepare_img_batch(img, cfg, device):
+    batch = {
+        'RGB': img['RGB'].to(device),
+        'NI': img['NI'].to(device),
+    }
+    if not _is_two_modal(cfg):
+        batch['TI'] = img['TI'].to(device)
+    return batch
+
+
+def _model_forward_train(model, cfg, img, target, target_cam, target_view,
+                         imgpath, writer, epoch):
+    cross_type = 'two_modal' if _is_two_modal(cfg) else None
+    return model(
+        img, label=target, cam_label=target_cam, view_label=target_view,
+        img_path=imgpath, writer=writer, epoch=epoch, cross_type=cross_type)
+
+
+def _model_forward_eval(model, cfg, img, camids, target_view, img_paths, epoch=None):
+    if _is_two_modal(cfg) and _is_cross_modal_eval(cfg):
+        return model(
+            img, cam_label=camids, view_label=target_view, img_path=img_paths,
+            mode=1, epoch=epoch, cross_type='cross_modal_eval',
+            modality_label=target_view)
+    if _is_two_modal(cfg):
+        return model(
+            img, cam_label=camids, view_label=target_view, img_path=img_paths,
+            mode=1, epoch=epoch, cross_type='two_modal')
+    return model(
+        img, cam_label=camids, view_label=target_view,
+        mode=1, img_path=img_paths, epoch=epoch)
+
+
 def _test_refresh_mode(value):
     mode = str(value).strip().lower()
     aliases = {
@@ -302,15 +343,14 @@ def do_train(cfg,
                 scheduler.step_update(num_updates)
             optimizer.zero_grad()
             optimizer_center.zero_grad()
-            img = {'RGB': img['RGB'].to(device),
-                   'NI': img['NI'].to(device),
-                   'TI': img['TI'].to(device)}
+            img = _prepare_img_batch(img, cfg, device)
             target = vid.to(device)
             target_cam = target_cam.to(device)
             target_view = target_view.to(device)
             with _cuda_autocast(amp_enabled, amp_dtype):
-                output = model(img, label=target, cam_label=target_cam, view_label=target_view, img_path=imgpath,
-                               writer=writer, epoch=epoch)
+                output = _model_forward_train(
+                    model, cfg, img, target, target_cam, target_view,
+                    imgpath, writer, epoch)
                 loss = 0
                 index = len(output) - 1 if len(output) % 2 == 1 else len(output)
                 branch_weights = _branch_loss_weights(cfg, index // 2)
@@ -368,14 +408,11 @@ def do_train(cfg,
                     print('!!!Mutil-Modal Testing!!!')
                     for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
                         with torch.no_grad():
-                            img = {'RGB': img['RGB'].to(device),
-                                   'NI': img['NI'].to(device),
-                                   'TI': img['TI'].to(device)}
+                            img = _prepare_img_batch(img, cfg, device)
                             camids = camids.to(device)
                             target_view = target_view.to(device)
-                            feat = model(
-                                img, cam_label=camids, view_label=target_view,
-                                mode=1, img_path=_, epoch=epoch)
+                            feat = _model_forward_eval(
+                                model, cfg, img, camids, target_view, _, epoch=epoch)
                             if cfg.DATASETS.NAMES == "MSVR310":
                                 evaluator_m.update((feat, vid, camid, target_view, _))
                             else:
@@ -410,14 +447,11 @@ def do_train(cfg,
                 print('!!!Mutil-Modal Testing!!!')
                 for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
                     with torch.no_grad():
-                        img = {'RGB': img['RGB'].to(device),
-                               'NI': img['NI'].to(device),
-                               'TI': img['TI'].to(device)}
+                        img = _prepare_img_batch(img, cfg, device)
                         camids = camids.to(device)
                         target_view = target_view.to(device)
-                        feat = model(
-                            img, cam_label=camids, view_label=target_view,
-                            mode=1, img_path=_, epoch=epoch)
+                        feat = _model_forward_eval(
+                            model, cfg, img, camids, target_view, _, epoch=epoch)
                         if cfg.DATASETS.NAMES == "MSVR310":
                             evaluator_m.update((feat, vid, camid, target_view, _))
                         else:
@@ -497,14 +531,11 @@ def do_inference(cfg,
     print('!!!Mutil-Modal Testing!!!')
     with torch.inference_mode():
         for n_iter, (img, vid, camid, camids, target_view, img_paths) in enumerate(val_loader):
-            img = {'RGB': img['RGB'].to(device),
-                   'NI': img['NI'].to(device),
-                   'TI': img['TI'].to(device)}
+            img = _prepare_img_batch(img, cfg, device)
             camids = camids.to(device)
             target_view = target_view.to(device)
-            feat = model(
-                img, cam_label=camids, view_label=target_view,
-                mode=1, img_path=img_paths)
+            feat = _model_forward_eval(
+                model, cfg, img, camids, target_view, img_paths)
             if cfg.DATASETS.NAMES == "MSVR310":
                 evaluator_m.update((feat, vid, camid, target_view, img_paths))
             else:

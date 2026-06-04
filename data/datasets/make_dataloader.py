@@ -12,6 +12,8 @@ from .msvr310 import MSVR310
 from .RGBNT201 import RGBNT201
 from .RGBNT100 import RGBNT100
 from .RGBNT300 import RGBNT300
+from .sysumm01 import SYSUMM01
+from .regdb import RegDB
 from .sampler_ddp import RandomIdentitySampler_DDP
 import torch.distributed as dist
 from .market_to_RGBNT201 import market_to_RGBNT201
@@ -26,6 +28,8 @@ __factory = {
     'MSVR310': MSVR310,
     'RGBNT300':RGBNT300,
     'Market1501-MM': market_to_RGBNT201,
+    'SYSU-MM01': SYSUMM01,
+    'RegDB': RegDB,
 }
 """ Random Erasing (Cutout)
 
@@ -264,7 +268,7 @@ def make_dataloader(cfg):
     ])
 
     num_workers = cfg.DATALOADER.NUM_WORKERS
-    dataset = __factory[cfg.DATASETS.NAMES](root=cfg.DATASETS.ROOT_DIR)
+    dataset = __factory[cfg.DATASETS.NAMES](root=cfg.DATASETS.ROOT_DIR, cfg=cfg)
     train_set = ImageDataset(dataset.train, train_transforms)
     train_set_normal = ImageDataset(dataset.train, val_transforms)
     num_classes = dataset.num_train_pids
